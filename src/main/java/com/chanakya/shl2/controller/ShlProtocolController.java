@@ -56,7 +56,7 @@ public class ShlProtocolController {
     public Mono<ResponseEntity<String>> getDirectFile(
             @PathVariable String manifestId,
             @RequestParam String recipient) {
-        return manifestService.handleDirectFileRequest(manifestId)
+        return manifestService.handleDirectFileRequest(manifestId, recipient)
                 .map(file -> ResponseEntity.ok()
                         .contentType(MediaType.parseMediaType("application/jose"))
                         .body(file.getEncryptedContent()))

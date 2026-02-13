@@ -8,6 +8,7 @@ import com.chanakya.shl2.model.document.ShlFileDocument;
 import com.chanakya.shl2.model.dto.request.ManifestRequest;
 import com.chanakya.shl2.model.dto.response.ManifestFileEntry;
 import com.chanakya.shl2.model.dto.response.ManifestResponse;
+import com.chanakya.shl2.model.enums.AccessType;
 import com.chanakya.shl2.model.enums.ShlFlag;
 import com.chanakya.shl2.model.enums.ShlStatus;
 import com.chanakya.shl2.repository.ShlFileRepository;
@@ -25,15 +26,21 @@ public class ManifestService {
     private final ShlFileRepository fileRepository;
     private final PasscodeService passcodeService;
     private final FileAccessService fileAccessService;
+    private final MemberService memberService;
+    private final AccessLogService accessLogService;
 
     public ManifestService(ShlRepository shlRepository,
                            ShlFileRepository fileRepository,
                            PasscodeService passcodeService,
-                           FileAccessService fileAccessService) {
+                           FileAccessService fileAccessService,
+                           MemberService memberService,
+                           AccessLogService accessLogService) {
         this.shlRepository = shlRepository;
         this.fileRepository = fileRepository;
         this.passcodeService = passcodeService;
         this.fileAccessService = fileAccessService;
+        this.memberService = memberService;
+        this.accessLogService = accessLogService;
     }
 
     /**
@@ -42,19 +49,34 @@ public class ManifestService {
     public Mono<ManifestResponse> processManifest(String manifestId, ManifestRequest request) {
         return shlRepository.findByManifestId(manifestId)
                 .switchIfEmpty(Mono.error(new ShlNotFoundException("SHL not found")))
+                .flatMap(this::checkSharingEnabled)
                 .flatMap(this::validateShlStatus)
                 .flatMap(shl -> passcodeService.verifyAndDecrement(shl, request.passcode()))
-                .flatMap(shl -> buildManifestResponse(shl, request));
+                .flatMap(shl -> buildManifestResponse(shl, request)
+                        .flatMap(response -> accessLogService
+                                .logAccess(shl, request.recipient(), AccessType.MANIFEST)
+                                .thenReturn(response)));
     }
 
     /**
      * Handles direct file request for U-flag SHLs (GET /api/shl/direct/{manifestId}).
      */
-    public Mono<ShlFileDocument> handleDirectFileRequest(String manifestId) {
+    public Mono<ShlFileDocument> handleDirectFileRequest(String manifestId, String recipient) {
         return shlRepository.findByManifestId(manifestId)
                 .switchIfEmpty(Mono.error(new ShlNotFoundException("SHL not found")))
+                .flatMap(this::checkSharingEnabled)
                 .flatMap(this::validateShlStatus)
-                .flatMap(shl -> fileRepository.findByShlId(shl.getId()).next());
+                .flatMap(shl -> fileRepository.findByShlId(shl.getId()).next()
+                        .flatMap(file -> accessLogService
+                                .logAccess(shl, recipient, AccessType.DIRECT_FILE)
+                                .thenReturn(file)));
+    }
+
+    private Mono<ShlDocument> checkSharingEnabled(ShlDocument shl) {
+        return memberService.isSharingEnabled(shl.getPatientId())
+                .flatMap(enabled -> enabled
+                        ? Mono.just(shl)
+                        : Mono.error(new ShlRevokedException("SHL is not available")));
     }
 
     private Mono<ShlDocument> validateShlStatus(ShlDocument shl) {

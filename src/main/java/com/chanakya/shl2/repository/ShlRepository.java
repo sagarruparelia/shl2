@@ -2,6 +2,7 @@ package com.chanakya.shl2.repository;
 
 import com.chanakya.shl2.model.document.ShlDocument;
 import org.springframework.data.mongodb.repository.ReactiveMongoRepository;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 public interface ShlRepository extends ReactiveMongoRepository<ShlDocument, String>, ShlRepositoryCustom {
@@ -9,4 +10,6 @@ public interface ShlRepository extends ReactiveMongoRepository<ShlDocument, Stri
     Mono<ShlDocument> findByManifestId(String manifestId);
 
     Mono<ShlDocument> findByManagementToken(String managementToken);
+
+    Flux<ShlDocument> findByPatientId(String patientId);
 }

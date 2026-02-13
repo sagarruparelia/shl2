@@ -41,6 +41,7 @@ public class ShlDocument {
     private String passcodeHash;
     private Integer passcodeFailuresRemaining;
 
+    @Indexed
     private String patientId;
     private List<FhirCategory> categories;
     private Instant timeframeStart;
