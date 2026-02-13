@@ -16,7 +16,7 @@ public record CreateShlRequest(
         Instant timeframeStart,
         Instant timeframeEnd,
         @Size(max = 80) String label,
-        String passcode,
+        @Size(min = 4, max = 20) String passcode,
         Set<ShlFlag> flags,
         boolean includeHealthCards,
         boolean generateQrCode

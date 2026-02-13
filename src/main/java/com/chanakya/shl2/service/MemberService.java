@@ -5,7 +5,9 @@ import com.chanakya.shl2.model.document.MemberPreferencesDocument;
 import com.chanakya.shl2.model.dto.request.UpdateMemberPreferencesRequest;
 import com.chanakya.shl2.model.dto.response.MemberPreferencesResponse;
 import com.chanakya.shl2.model.dto.response.MemberShlSummary;
+import com.chanakya.shl2.model.enums.AccessType;
 import com.chanakya.shl2.model.enums.ShlStatus;
+import com.chanakya.shl2.repository.AccessLogDynamoRepository;
 import com.chanakya.shl2.repository.MemberPreferencesRepository;
 import com.chanakya.shl2.repository.ShlFileRepository;
 import com.chanakya.shl2.repository.ShlRepository;
@@ -22,13 +24,22 @@ public class MemberService {
     private final ShlRepository shlRepository;
     private final ShlFileRepository fileRepository;
     private final MemberPreferencesRepository preferencesRepository;
+    private final AccessLogService accessLogService;
+    private final S3StorageService s3StorageService;
+    private final AccessLogDynamoRepository accessLogDynamoRepository;
 
     public MemberService(ShlRepository shlRepository,
                          ShlFileRepository fileRepository,
-                         MemberPreferencesRepository preferencesRepository) {
+                         MemberPreferencesRepository preferencesRepository,
+                         AccessLogService accessLogService,
+                         S3StorageService s3StorageService,
+                         AccessLogDynamoRepository accessLogDynamoRepository) {
         this.shlRepository = shlRepository;
         this.fileRepository = fileRepository;
         this.preferencesRepository = preferencesRepository;
+        this.accessLogService = accessLogService;
+        this.s3StorageService = s3StorageService;
+        this.accessLogDynamoRepository = accessLogDynamoRepository;
     }
 
     public Flux<MemberShlSummary> listShlsForMember(String patientId) {
@@ -67,7 +78,7 @@ public class MemberService {
     public Mono<MemberPreferencesResponse> getPreferences(String patientId) {
         return preferencesRepository.findByPatientId(patientId)
                 .map(doc -> new MemberPreferencesResponse(doc.isSharingEnabled(), doc.getUpdatedAt()))
-                .defaultIfEmpty(new MemberPreferencesResponse(true, null));
+                .defaultIfEmpty(new MemberPreferencesResponse(false, null));
     }
 
     public Mono<MemberPreferencesResponse> updatePreferences(String patientId,
@@ -82,12 +93,24 @@ public class MemberService {
                     doc.setUpdatedAt(Instant.now());
                     return preferencesRepository.save(doc);
                 })
-                .map(doc -> new MemberPreferencesResponse(doc.isSharingEnabled(), doc.getUpdatedAt()));
+                .flatMap(doc -> accessLogService.logAccess(patientId, null, AccessType.PREFERENCE_CHANGED)
+                        .thenReturn(new MemberPreferencesResponse(doc.isSharingEnabled(), doc.getUpdatedAt())));
     }
 
     public Mono<Boolean> isSharingEnabled(String patientId) {
         return preferencesRepository.findByPatientId(patientId)
                 .map(MemberPreferencesDocument::isSharingEnabled)
-                .defaultIfEmpty(true);
+                .defaultIfEmpty(false);
+    }
+
+    public Mono<Void> deleteAllPatientData(String patientId) {
+        return shlRepository.findByPatientId(patientId)
+                .flatMap(shl -> s3StorageService.deleteByPrefix("shl-files/" + shl.getId() + "/")
+                        .then(fileRepository.deleteByShlId(shl.getId()))
+                        .then(shlRepository.delete(shl)))
+                .then(accessLogDynamoRepository.deleteByPatientId(patientId))
+                .then(preferencesRepository.findByPatientId(patientId)
+                        .flatMap(preferencesRepository::delete))
+                .then();
     }
 }

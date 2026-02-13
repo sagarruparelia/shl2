@@ -7,6 +7,8 @@ import com.chanakya.shl2.model.dto.response.AccessLogEntry;
 import com.chanakya.shl2.model.enums.AccessType;
 import com.chanakya.shl2.repository.AccessLogDynamoRepository;
 import com.chanakya.shl2.repository.ShlRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -18,6 +20,8 @@ import java.util.UUID;
 
 @Service
 public class AccessLogService {
+
+    private static final Logger log = LoggerFactory.getLogger(AccessLogService.class);
 
     private final AccessLogDynamoRepository accessLogRepository;
     private final ShlRepository shlRepository;
@@ -42,7 +46,29 @@ public class AccessLogService {
         );
 
         return accessLogRepository.save(item)
-                .onErrorComplete();
+                .doOnError(e -> log.error("event=access_log_write_failed shlId={} accessType={} error={}",
+                        shl.getId(), accessType, e.getMessage()))
+                .onErrorResume(e -> Mono.empty());
+    }
+
+    public Mono<Void> logAccess(String patientId, String recipient, AccessType accessType) {
+        Instant now = Instant.now();
+        String id = UUID.randomUUID().toString();
+        AccessLogItem item = new AccessLogItem(
+                patientId,
+                AccessLogItem.buildSortKey(now, id),
+                id,
+                null,
+                null,
+                recipient,
+                accessType,
+                now
+        );
+
+        return accessLogRepository.save(item)
+                .doOnError(e -> log.error("event=access_log_write_failed patientId={} accessType={} error={}",
+                        patientId, accessType, e.getMessage()))
+                .onErrorResume(e -> Mono.empty());
     }
 
     public Flux<AccessLogEntry> getAccessLogForMember(String patientId) {

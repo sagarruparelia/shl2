@@ -1,16 +1,31 @@
 package com.chanakya.shl2.exception;
 
 import com.chanakya.shl2.model.dto.response.ErrorResponse;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.bind.support.WebExchangeBindException;
 import reactor.core.publisher.Mono;
 
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
+    private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+    @ExceptionHandler(WebExchangeBindException.class)
+    public Mono<ResponseEntity<ErrorResponse>> handleValidation(WebExchangeBindException ex) {
+        String message = ex.getFieldErrors().stream()
+                .map(fe -> fe.getField() + ": " + fe.getDefaultMessage())
+                .collect(Collectors.joining(", "));
+        return Mono.just(ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(new ErrorResponse("validation_error", message)));
+    }
 
     @ExceptionHandler(ShlNotFoundException.class)
     public Mono<ResponseEntity<ErrorResponse>> handleNotFound(ShlNotFoundException ex) {
@@ -59,7 +74,8 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(IllegalStateException.class)
     public Mono<ResponseEntity<ErrorResponse>> handleIllegalState(IllegalStateException ex) {
+        log.error("Illegal state: {}", ex.getMessage());
         return Mono.just(ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                .body(new ErrorResponse("bad_request", ex.getMessage())));
+                .body(new ErrorResponse("bad_request", "Invalid request state")));
     }
 }

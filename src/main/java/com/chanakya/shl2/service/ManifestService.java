@@ -1,5 +1,7 @@
 package com.chanakya.shl2.service;
 
+import com.chanakya.shl2.exception.PasscodeExhaustedException;
+import com.chanakya.shl2.exception.PasscodeInvalidException;
 import com.chanakya.shl2.exception.ShlExpiredException;
 import com.chanakya.shl2.exception.ShlNotFoundException;
 import com.chanakya.shl2.exception.ShlRevokedException;
@@ -53,7 +55,13 @@ public class ManifestService {
                 .switchIfEmpty(Mono.error(new ShlNotFoundException("SHL not found")))
                 .flatMap(this::checkSharingEnabled)
                 .flatMap(this::validateShlStatus)
-                .flatMap(shl -> passcodeService.verifyAndDecrement(shl, request.passcode()))
+                .flatMap(shl -> passcodeService.verifyAndDecrement(shl, request.passcode())
+                        .onErrorResume(PasscodeInvalidException.class, ex ->
+                                accessLogService.logAccess(shl, request.recipient(), AccessType.PASSCODE_FAILED)
+                                        .then(Mono.error(ex)))
+                        .onErrorResume(PasscodeExhaustedException.class, ex ->
+                                accessLogService.logAccess(shl, request.recipient(), AccessType.PASSCODE_EXHAUSTED)
+                                        .then(Mono.error(ex))))
                 .flatMap(shl -> buildManifestResponse(shl, request)
                         .flatMap(response -> accessLogService
                                 .logAccess(shl, request.recipient(), AccessType.MANIFEST)

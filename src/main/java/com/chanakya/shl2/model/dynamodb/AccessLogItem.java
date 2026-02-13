@@ -28,8 +28,12 @@ public record AccessLogItem(
         item.put("patientId", AttributeValue.fromS(patientId));
         item.put("sortKey", AttributeValue.fromS(sortKey));
         item.put("id", AttributeValue.fromS(id));
-        item.put("shlId", AttributeValue.fromS(shlId));
-        item.put("manifestId", AttributeValue.fromS(manifestId));
+        if (shlId != null) {
+            item.put("shlId", AttributeValue.fromS(shlId));
+        }
+        if (manifestId != null) {
+            item.put("manifestId", AttributeValue.fromS(manifestId));
+        }
         item.put("accessType", AttributeValue.fromS(accessType.name()));
         item.put("accessedAt", AttributeValue.fromS(accessedAt.toString()));
         if (recipient != null) {
@@ -43,8 +47,8 @@ public record AccessLogItem(
                 item.get("patientId").s(),
                 item.get("sortKey").s(),
                 item.get("id").s(),
-                item.get("shlId").s(),
-                item.get("manifestId").s(),
+                item.containsKey("shlId") ? item.get("shlId").s() : null,
+                item.containsKey("manifestId") ? item.get("manifestId").s() : null,
                 item.containsKey("recipient") ? item.get("recipient").s() : null,
                 AccessType.valueOf(item.get("accessType").s()),
                 Instant.parse(item.get("accessedAt").s())

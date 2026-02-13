@@ -10,6 +10,7 @@ import com.chanakya.shl2.model.document.ShlFileDocument;
 import com.chanakya.shl2.model.dto.request.CreateShlRequest;
 import com.chanakya.shl2.model.dto.response.CreateShlResponse;
 import com.chanakya.shl2.model.dto.response.ShlStatusResponse;
+import com.chanakya.shl2.model.enums.AccessType;
 import com.chanakya.shl2.model.enums.ShlFlag;
 import com.chanakya.shl2.model.enums.ShlStatus;
 import com.chanakya.shl2.repository.ShlFileRepository;
@@ -37,6 +38,7 @@ public class ShlCreationService {
     private final SmartHealthCardService shcService;
     private final QrCodeService qrCodeService;
     private final S3StorageService s3StorageService;
+    private final AccessLogService accessLogService;
     private final ShlProperties properties;
 
     public ShlCreationService(ShlRepository shlRepository,
@@ -49,6 +51,7 @@ public class ShlCreationService {
                               SmartHealthCardService shcService,
                               QrCodeService qrCodeService,
                               S3StorageService s3StorageService,
+                              AccessLogService accessLogService,
                               ShlProperties properties) {
         this.shlRepository = shlRepository;
         this.fileRepository = fileRepository;
@@ -60,6 +63,7 @@ public class ShlCreationService {
         this.shcService = shcService;
         this.qrCodeService = qrCodeService;
         this.s3StorageService = s3StorageService;
+        this.accessLogService = accessLogService;
         this.properties = properties;
     }
 
@@ -109,8 +113,9 @@ public class ShlCreationService {
                 .build();
 
         return shlRepository.save(shl)
-                .flatMap(savedShl -> fetchAndEncryptData(savedShl)
-                        .then(Mono.just(savedShl)))
+                .flatMap(savedShl -> accessLogService.logAccess(savedShl, null, AccessType.CREATED)
+                        .then(fetchAndEncryptData(savedShl))
+                        .thenReturn(savedShl))
                 .flatMap(savedShl -> {
                     String shlUri = payloadEncoder.encode(savedShl);
 
@@ -165,7 +170,7 @@ public class ShlCreationService {
                     shl.setUpdatedAt(Instant.now());
                     return shlRepository.save(shl);
                 })
-                .then();
+                .flatMap(savedShl -> accessLogService.logAccess(savedShl, null, AccessType.REVOKED));
     }
 
     /**
@@ -185,7 +190,7 @@ public class ShlCreationService {
                                 shl.setUpdatedAt(Instant.now());
                                 return shlRepository.save(shl);
                             }))
-                            .then();
+                            .flatMap(savedShl -> accessLogService.logAccess(savedShl, null, AccessType.REFRESHED));
                 });
     }
 

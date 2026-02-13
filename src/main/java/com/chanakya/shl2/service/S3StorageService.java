@@ -37,7 +37,8 @@ public class S3StorageService {
         PutObjectRequest.Builder requestBuilder = PutObjectRequest.builder()
                 .bucket(bucketName)
                 .key(s3Key)
-                .contentType("application/jose");
+                .contentType("application/jose")
+                .serverSideEncryption(ServerSideEncryption.AES256);
 
         if (expirationDate != null) {
             requestBuilder.tagging(Tagging.builder()

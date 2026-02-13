@@ -7,6 +7,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 
@@ -45,6 +46,21 @@ public class AccessLogDynamoRepository {
         return Flux.from(dynamoClient.queryPaginator(request))
                 .flatMapIterable(response -> response.items())
                 .map(AccessLogItem::fromItem);
+    }
+
+    public Mono<Void> deleteByPatientId(String patientId) {
+        return findByPatientId(patientId)
+                .flatMap(item -> {
+                    DeleteItemRequest deleteRequest = DeleteItemRequest.builder()
+                            .tableName(tableName)
+                            .key(Map.of(
+                                    "patientId", AttributeValue.fromS(item.patientId()),
+                                    "sortKey", AttributeValue.fromS(item.sortKey())
+                            ))
+                            .build();
+                    return Mono.fromFuture(dynamoClient.deleteItem(deleteRequest));
+                })
+                .then();
     }
 
     public Flux<AccessLogItem> findByShlId(String shlId) {

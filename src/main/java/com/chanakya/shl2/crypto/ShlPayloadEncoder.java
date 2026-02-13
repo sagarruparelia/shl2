@@ -5,6 +5,8 @@ import com.chanakya.shl2.model.document.ShlDocument;
 import com.chanakya.shl2.model.enums.ShlFlag;
 import com.chanakya.shl2.util.Base64UrlUtil;
 import tools.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
@@ -15,6 +17,8 @@ import java.util.stream.Collectors;
 
 @Service
 public class ShlPayloadEncoder {
+
+    private static final Logger log = LoggerFactory.getLogger(ShlPayloadEncoder.class);
 
     private final ShlProperties properties;
     private final ObjectMapper objectMapper;
@@ -59,7 +63,12 @@ public class ShlPayloadEncoder {
 
             String json = objectMapper.writeValueAsString(payload);
             String encoded = Base64UrlUtil.encode(json.getBytes(StandardCharsets.UTF_8));
-            return "shlink:/" + encoded;
+            String shlUri = "shlink:/" + encoded;
+            if (shlUri.length() > 128) {
+                log.warn("SHL URI length {} exceeds 128 characters (recommended max for QR reliability), shlId={}",
+                        shlUri.length(), shl.getId());
+            }
+            return shlUri;
         } catch (Exception e) {
             throw new RuntimeException("Failed to encode SHL payload", e);
         }
