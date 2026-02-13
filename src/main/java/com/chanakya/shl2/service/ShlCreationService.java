@@ -75,6 +75,11 @@ public class ShlCreationService {
             flags.add(ShlFlag.P);
         }
 
+        // Per SHL spec: U and P flags are mutually exclusive
+        if (flags.contains(ShlFlag.U) && flags.contains(ShlFlag.P)) {
+            return Mono.error(new IllegalStateException("U and P flags cannot be combined"));
+        }
+
         // Build SHL document
         Instant now = Instant.now();
         ShlDocument shl = ShlDocument.builder()
@@ -198,11 +203,12 @@ public class ShlCreationService {
                         shl.getTimeframeEnd()
                 )
                 .flatMap(wrapper -> {
-                    // Encrypt the FHIR bundle
-                    String encrypted = jweService.encrypt(wrapper.getBundleJson(), shl.getEncryptionKeyBase64());
+                    // Encrypt the FHIR bundle with cty header per SHL spec
+                    String fhirContentType = "application/fhir+json;fhirVersion=4.0.1";
+                    String encrypted = jweService.encrypt(wrapper.getBundleJson(), shl.getEncryptionKeyBase64(), fhirContentType);
                     ShlFileDocument fileDoc = ShlFileDocument.builder()
                             .shlId(shl.getId())
-                            .contentType("application/fhir+json")
+                            .contentType(fhirContentType)
                             .encryptedContent(encrypted)
                             .lastUpdated(Instant.now())
                             .createdAt(Instant.now())
@@ -224,10 +230,11 @@ public class ShlCreationService {
                 )
                 .flatMap(wrapper -> shcService.createHealthCard(wrapper.getBundleJson())
                         .flatMap(shcJson -> {
-                            String encrypted = jweService.encrypt(shcJson, shl.getEncryptionKeyBase64());
+                            String shcContentType = "application/smart-health-card";
+                            String encrypted = jweService.encrypt(shcJson, shl.getEncryptionKeyBase64(), shcContentType);
                             ShlFileDocument fileDoc = ShlFileDocument.builder()
                                     .shlId(shl.getId())
-                                    .contentType("application/smart-health-card")
+                                    .contentType(shcContentType)
                                     .encryptedContent(encrypted)
                                     .lastUpdated(Instant.now())
                                     .createdAt(Instant.now())

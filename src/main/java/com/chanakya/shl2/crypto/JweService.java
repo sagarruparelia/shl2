@@ -16,11 +16,14 @@ public class JweService {
     /**
      * Encrypts plaintext using AES-256-GCM with direct key agreement.
      * Nimbus auto-generates a unique IV per call.
+     * Per SHL spec, the JWE header includes cty indicating the content type of the plaintext.
      */
-    public String encrypt(String plaintext, String keyBase64Url) {
+    public String encrypt(String plaintext, String keyBase64Url, String contentType) {
         try {
             SecretKey key = toSecretKey(keyBase64Url);
-            JWEHeader header = new JWEHeader(JWEAlgorithm.DIR, EncryptionMethod.A256GCM);
+            JWEHeader header = new JWEHeader.Builder(JWEAlgorithm.DIR, EncryptionMethod.A256GCM)
+                    .contentType(contentType)
+                    .build();
             JWEObject jwe = new JWEObject(header, new Payload(plaintext.getBytes(StandardCharsets.UTF_8)));
             jwe.encrypt(new DirectEncrypter(key));
             return jwe.serialize();

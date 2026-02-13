@@ -48,10 +48,13 @@ public class ShlProtocolController {
 
     /**
      * Direct file access for U-flag SHLs.
-     * GET /api/shl/direct/{manifestId}
+     * GET /api/shl/direct/{manifestId}?recipient=...
+     * Per SHL spec, recipient query parameter is required.
      */
     @GetMapping("/direct/{manifestId}")
-    public Mono<ResponseEntity<String>> getDirectFile(@PathVariable String manifestId) {
+    public Mono<ResponseEntity<String>> getDirectFile(
+            @PathVariable String manifestId,
+            @RequestParam String recipient) {
         return manifestService.handleDirectFileRequest(manifestId)
                 .map(file -> ResponseEntity.ok()
                         .contentType(MediaType.parseMediaType("application/jose"))

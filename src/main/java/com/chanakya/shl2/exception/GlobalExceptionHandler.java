@@ -7,6 +7,8 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import reactor.core.publisher.Mono;
 
+import java.util.Map;
+
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
@@ -28,22 +30,25 @@ public class GlobalExceptionHandler {
                 .body(new ErrorResponse("revoked", ex.getMessage())));
     }
 
+    /**
+     * Per SHL spec: 401 body is exactly {"remainingAttempts": N}
+     */
     @ExceptionHandler(PasscodeRequiredException.class)
-    public Mono<ResponseEntity<ErrorResponse>> handlePasscodeRequired(PasscodeRequiredException ex) {
+    public Mono<ResponseEntity<Map<String, Object>>> handlePasscodeRequired(PasscodeRequiredException ex) {
         return Mono.just(ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                .body(new ErrorResponse("passcode_required", ex.getMessage())));
+                .body(Map.of("remainingAttempts", -1)));
     }
 
     @ExceptionHandler(PasscodeInvalidException.class)
-    public Mono<ResponseEntity<ErrorResponse>> handlePasscodeInvalid(PasscodeInvalidException ex) {
+    public Mono<ResponseEntity<Map<String, Integer>>> handlePasscodeInvalid(PasscodeInvalidException ex) {
         return Mono.just(ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                .body(new ErrorResponse("passcode_invalid", ex.getMessage(), ex.getRemainingAttempts())));
+                .body(Map.of("remainingAttempts", ex.getRemainingAttempts())));
     }
 
     @ExceptionHandler(PasscodeExhaustedException.class)
-    public Mono<ResponseEntity<ErrorResponse>> handlePasscodeExhausted(PasscodeExhaustedException ex) {
+    public Mono<ResponseEntity<Map<String, Integer>>> handlePasscodeExhausted(PasscodeExhaustedException ex) {
         return Mono.just(ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                .body(new ErrorResponse("passcode_exhausted", ex.getMessage(), 0)));
+                .body(Map.of("remainingAttempts", 0)));
     }
 
     @ExceptionHandler(HealthLakeException.class)

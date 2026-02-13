@@ -74,7 +74,8 @@ public class ManifestService {
                 .map(file -> toFileEntry(file, request.embeddedLengthMax()))
                 .collectList()
                 .map(files -> {
-                    String status = "active";
+                    // Per SHL spec: "can-change" for L-flag, "finalized" otherwise
+                    String status = shl.getFlags().contains(ShlFlag.L) ? "can-change" : "finalized";
                     return new ManifestResponse(status, files);
                 });
     }

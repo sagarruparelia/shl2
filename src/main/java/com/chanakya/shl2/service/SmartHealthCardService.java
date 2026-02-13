@@ -13,6 +13,8 @@ import reactor.core.scheduler.Schedulers;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.zip.Deflater;
 
 @Service
@@ -47,7 +49,6 @@ public class SmartHealthCardService {
             ObjectNode vc = vcPayload.putObject("vc");
             ArrayNode types = vc.putArray("type");
             types.add("https://smarthealth.cards#health-card");
-            types.add("https://smarthealth.cards#covid19");
 
             ObjectNode credentialSubject = vc.putObject("credentialSubject");
             credentialSubject.put("fhirVersion", "4.0.1");
@@ -74,44 +75,91 @@ public class SmartHealthCardService {
         ObjectNode minified = (ObjectNode) bundle.deepCopy();
 
         JsonNode entries = minified.path("entry");
-        if (entries.isArray()) {
-            int index = 0;
-            for (JsonNode entry : entries) {
-                // Replace fullUrl with resource:N
-                if (entry instanceof ObjectNode entryObj) {
-                    entryObj.put("fullUrl", "resource:" + index);
+        if (!entries.isArray()) {
+            return minified;
+        }
 
-                    JsonNode resource = entry.path("resource");
-                    if (resource instanceof ObjectNode resourceObj) {
-                        // Strip Resource.id
-                        resourceObj.remove("id");
+        // First pass: build mapping from original fullUrl to resource:N
+        Map<String, String> referenceMap = new HashMap<>();
+        int index = 0;
+        for (JsonNode entry : entries) {
+            String originalUrl = entry.path("fullUrl").asText(null);
+            if (originalUrl != null) {
+                referenceMap.put(originalUrl, "resource:" + index);
+            }
+            // Also map ResourceType/id patterns
+            JsonNode resource = entry.path("resource");
+            String resourceType = resource.path("resourceType").asText(null);
+            String resourceId = resource.path("id").asText(null);
+            if (resourceType != null && resourceId != null) {
+                referenceMap.put(resourceType + "/" + resourceId, "resource:" + index);
+            }
+            index++;
+        }
 
-                        // Strip Resource.meta (keep .meta.security)
-                        JsonNode meta = resourceObj.path("meta");
-                        if (meta instanceof ObjectNode metaObj) {
-                            JsonNode security = metaObj.path("security");
-                            if (security.isMissingNode() || security.isEmpty()) {
-                                resourceObj.remove("meta");
-                            } else {
-                                ObjectNode newMeta = objectMapper.createObjectNode();
-                                newMeta.set("security", security);
-                                resourceObj.set("meta", newMeta);
-                            }
+        // Second pass: apply minification
+        index = 0;
+        for (JsonNode entry : entries) {
+            if (entry instanceof ObjectNode entryObj) {
+                entryObj.put("fullUrl", "resource:" + index);
+
+                JsonNode resource = entry.path("resource");
+                if (resource instanceof ObjectNode resourceObj) {
+                    // Strip Resource.id
+                    resourceObj.remove("id");
+
+                    // Strip Resource.meta (keep .meta.security)
+                    JsonNode meta = resourceObj.path("meta");
+                    if (meta instanceof ObjectNode metaObj) {
+                        JsonNode security = metaObj.path("security");
+                        if (security.isMissingNode() || security.isEmpty()) {
+                            resourceObj.remove("meta");
+                        } else {
+                            ObjectNode newMeta = objectMapper.createObjectNode();
+                            newMeta.set("security", security);
+                            resourceObj.set("meta", newMeta);
                         }
-
-                        // Strip DomainResource.text
-                        resourceObj.remove("text");
-
-                        // Strip CodeableConcept.text and Coding.display recursively
-                        stripCodeableConceptText(resourceObj);
                     }
 
-                    index++;
+                    // Strip DomainResource.text
+                    resourceObj.remove("text");
+
+                    // Strip CodeableConcept.text and Coding.display recursively
+                    stripCodeableConceptText(resourceObj);
+
+                    // Rewrite Reference.reference values to resource:N
+                    rewriteReferences(resourceObj, referenceMap);
                 }
+
+                index++;
             }
         }
 
         return minified;
+    }
+
+    /**
+     * Recursively rewrites Reference.reference values to use resource:N URIs.
+     */
+    private void rewriteReferences(JsonNode node, Map<String, String> referenceMap) {
+        if (node instanceof ObjectNode objNode) {
+            // Check if this is a FHIR Reference (has "reference" string field)
+            JsonNode refNode = objNode.path("reference");
+            if (refNode.isTextual()) {
+                String mapped = referenceMap.get(refNode.asText());
+                if (mapped != null) {
+                    objNode.put("reference", mapped);
+                }
+            }
+            // Recurse into child nodes
+            for (String fieldName : objNode.propertyNames()) {
+                rewriteReferences(objNode.get(fieldName), referenceMap);
+            }
+        } else if (node instanceof ArrayNode arrayNode) {
+            for (JsonNode element : arrayNode) {
+                rewriteReferences(element, referenceMap);
+            }
+        }
     }
 
     /**

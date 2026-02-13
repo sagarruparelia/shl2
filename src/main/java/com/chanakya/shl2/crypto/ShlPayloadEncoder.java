@@ -30,7 +30,12 @@ public class ShlPayloadEncoder {
     public String encode(ShlDocument shl) {
         try {
             Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("url", buildManifestUrl(shl.getManifestId()));
+            // U-flag: url resolves directly via GET; otherwise manifest POST
+            Set<ShlFlag> shlFlags = shl.getFlags();
+            boolean hasUFlag = shlFlags != null && shlFlags.contains(ShlFlag.U);
+            payload.put("url", hasUFlag
+                    ? buildDirectUrl(shl.getManifestId())
+                    : buildManifestUrl(shl.getManifestId()));
             payload.put("key", shl.getEncryptionKeyBase64());
 
             if (shl.getExpirationTime() != null) {
@@ -62,5 +67,9 @@ public class ShlPayloadEncoder {
 
     private String buildManifestUrl(String manifestId) {
         return properties.baseUrl() + "/api/shl/manifest/" + manifestId;
+    }
+
+    private String buildDirectUrl(String manifestId) {
+        return properties.baseUrl() + "/api/shl/direct/" + manifestId;
     }
 }
