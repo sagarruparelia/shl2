@@ -4,6 +4,7 @@ import com.chanakya.shl2.model.dto.request.ManifestRequest;
 import com.chanakya.shl2.model.dto.response.ManifestResponse;
 import com.chanakya.shl2.service.FileAccessService;
 import com.chanakya.shl2.service.ManifestService;
+import jakarta.validation.Valid;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -29,7 +30,7 @@ public class ShlProtocolController {
     @PostMapping("/manifest/{manifestId}")
     public Mono<ManifestResponse> getManifest(
             @PathVariable String manifestId,
-            @RequestBody ManifestRequest request) {
+            @Valid @RequestBody ManifestRequest request) {
         return manifestService.processManifest(manifestId, request);
     }
 

@@ -196,6 +196,33 @@ public class ShlCreationService {
     }
 
     private Mono<Void> fetchAndEncryptData(ShlDocument shl) {
+        String fhirContentType = "application/fhir+json;fhirVersion=4.0.1";
+
+        if (shl.getFlags().contains(ShlFlag.U)) {
+            // U-flag: spec requires single encrypted file — merge all bundles into one
+            return healthLakeService.fetchResourcesByCategory(
+                            shl.getPatientId(),
+                            shl.getCategories(),
+                            shl.getTimeframeStart(),
+                            shl.getTimeframeEnd()
+                    )
+                    .map(wrapper -> wrapper.getBundleJson())
+                    .collectList()
+                    .flatMap(bundles -> {
+                        String merged = mergeFhirBundles(bundles);
+                        String encrypted = jweService.encrypt(merged, shl.getEncryptionKeyBase64(), fhirContentType);
+                        ShlFileDocument fileDoc = ShlFileDocument.builder()
+                                .shlId(shl.getId())
+                                .contentType(fhirContentType)
+                                .encryptedContent(encrypted)
+                                .lastUpdated(Instant.now())
+                                .createdAt(Instant.now())
+                                .build();
+                        return fileRepository.save(fileDoc);
+                    })
+                    .then();
+        }
+
         return healthLakeService.fetchResourcesByCategory(
                         shl.getPatientId(),
                         shl.getCategories(),
@@ -203,8 +230,6 @@ public class ShlCreationService {
                         shl.getTimeframeEnd()
                 )
                 .flatMap(wrapper -> {
-                    // Encrypt the FHIR bundle with cty header per SHL spec
-                    String fhirContentType = "application/fhir+json;fhirVersion=4.0.1";
                     String encrypted = jweService.encrypt(wrapper.getBundleJson(), shl.getEncryptionKeyBase64(), fhirContentType);
                     ShlFileDocument fileDoc = ShlFileDocument.builder()
                             .shlId(shl.getId())
@@ -219,6 +244,36 @@ public class ShlCreationService {
                         ? createHealthCards(shl)
                         : Mono.empty())
                 .then();
+    }
+
+    /**
+     * Merges multiple FHIR Bundle JSONs into a single Bundle for U-flag SHLs.
+     */
+    private String mergeFhirBundles(java.util.List<String> bundles) {
+        if (bundles.size() == 1) {
+            return bundles.getFirst();
+        }
+        try {
+            var objectMapper = new tools.jackson.databind.ObjectMapper();
+            var merged = (tools.jackson.databind.node.ObjectNode) objectMapper.readTree(bundles.getFirst());
+            var entries = merged.has("entry")
+                    ? (tools.jackson.databind.node.ArrayNode) merged.get("entry")
+                    : merged.putArray("entry");
+
+            for (int i = 1; i < bundles.size(); i++) {
+                var other = objectMapper.readTree(bundles.get(i));
+                var otherEntries = other.path("entry");
+                if (otherEntries.isArray()) {
+                    for (var entry : otherEntries) {
+                        entries.add(entry);
+                    }
+                }
+            }
+            merged.put("total", entries.size());
+            return objectMapper.writeValueAsString(merged);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to merge FHIR bundles for U-flag SHL", e);
+        }
     }
 
     private Mono<Void> createHealthCards(ShlDocument shl) {
