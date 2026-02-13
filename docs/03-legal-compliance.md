@@ -33,17 +33,18 @@ The patient retains control: they choose what to share, can set expiration, add 
 
 | Layer | Algorithm | Standard | Purpose |
 |---|---|---|---|
-| Data at rest (files) | AES-256-GCM via JWE | NIST SP 800-38D | FHIR bundles encrypted before storage in MongoDB |
+| Data at rest (files) | AES-256-GCM via JWE | NIST SP 800-38D | FHIR bundles encrypted before storage in S3 |
+| Data at rest (S3) | SSE-S3 (AES-256) | NIST SP 800-38D | Defense-in-depth: S3 server-side encryption on top of JWE |
 | Key in transit (SHL URI) | Base64url in link | SHL spec | Decryption key embedded in the link itself |
 | SHC signing | ES256 (ECDSA P-256) | FIPS 186-4 | Tamper-proof verifiable credentials |
 | Passcode storage | BCrypt | OWASP recommended | Passcodes never stored in plaintext |
-| File URL integrity | HMAC-SHA256 | RFC 2104 | Prevents URL tampering and enforces expiry |
+| File URL integrity | S3 presigned URLs (SigV4) | AWS SigV4 | Signed URLs with 1-hour expiry, generated server-side |
 
 ### Key Management
 
 - **Encryption keys**: 32 bytes (256 bits) generated from `java.security.SecureRandom` (CSPRNG). One unique key per SHL. Never stored separately — only in MongoDB document and in the SHL URI.
 - **Signing key**: EC P-256 private key in JWK format. Must be stored in a secrets manager in production. Only the public key is exposed via `/.well-known/jwks.json`.
-- **HMAC signing secret**: Configurable via environment variable. Used for file URL signing only.
+- **S3 presigned URLs**: Generated server-side using AWS SigV4 credentials. No custom signing secrets required — uses IAM-based authentication.
 
 ### Access Control
 
@@ -64,9 +65,11 @@ The patient retains control: they choose what to share, can set expiration, add 
 |---|---|---|---|
 | AWS HealthLake | Yes | AWS encryption at rest, IAM, VPC | Source system — managed by AWS |
 | MongoDB `shls` collection | Minimal (patient ID, metadata) | Database encryption, access control | Until SHL deleted |
-| MongoDB `shl_files` collection | Yes (JWE-encrypted FHIR bundles) | AES-256-GCM encrypted before storage | Until SHL deleted or refreshed |
+| MongoDB `shl_files` collection | No (metadata + S3 pointer only) | Database encryption, access control | Until SHL deleted or refreshed |
+| S3 `shl2-files` bucket | Yes (JWE-encrypted FHIR bundles) | JWE (AES-256-GCM) + SSE-S3, bucket policy, no public access | Until SHL deleted; expired files transition to Glacier |
+| DynamoDB `shl2-access-logs` table | Minimal (patient ID, SHL ID, recipient) | DynamoDB encryption at rest, IAM, PITR | 10-year CMS compliance retention |
 | SHL URI | Yes (contains decryption key) | Shared only with patient; patient shares at discretion | Ephemeral (in patient's possession) |
-| File location URLs | No (signed pointer only) | HMAC-SHA256, 1-hour expiry | Ephemeral |
+| File location URLs | No (presigned pointer only) | S3 presigned URL (SigV4), 1-hour expiry | Ephemeral |
 | Server memory | Transiently (during encrypt/decrypt) | Garbage collected after request | Request duration only |
 | Server logs | Must NOT contain PHI | Log sanitization required | Per log retention policy |
 
@@ -91,7 +94,7 @@ The patient retains control: they choose what to share, can set expiration, add 
 | SHL payload: label max 80 chars | `@Size(max=80)` validation annotation | Request validation at controller |
 | Manifest status: finalized/can-change | L-flag -> "can-change", else "finalized" | Integration test |
 | 401 response: `{"remainingAttempts": N}` | Exact format in GlobalExceptionHandler | Integration test |
-| File URLs: max 1 hour lifetime | Configurable `fileUrlExpirySeconds`, default 3600 | HMAC expiry verification |
+| File URLs: max 1 hour lifetime | Configurable `fileUrlExpirySeconds`, default 3600 | S3 presigned URL expiry |
 | JWE: alg=dir, enc=A256GCM, cty header | Nimbus JOSE+JWT library, explicit header | Unit test: parse JWE header |
 | U+P mutual exclusion | Validated in ShlCreationService | Unit test |
 | U-flag: single encrypted file | All bundles merged for U-flag | Unit test: verify single file |
@@ -164,9 +167,11 @@ The patient retains control: they choose what to share, can set expiration, add 
 | Gap | Risk | Remediation Plan |
 |---|---|---|
 | No auth on management API | Medium | Add OAuth2/OIDC in next phase |
-| No audit database | Medium | Add structured audit logging to separate store |
 | No BAA with MongoDB provider | High (if cloud-hosted) | Execute BAA before production deployment |
 | Development signing key in repo | Low (dev only) | Production key in secrets manager |
+
+**Resolved gaps:**
+- ~~No audit database~~ — Access logs now stored in DynamoDB with 10-year retention, PITR enabled, Standard-IA table class for cost optimization.
 
 ---
 

@@ -195,7 +195,7 @@ Content-Type: application/json
   "files": [
     {
       "contentType": "application/fhir+json;fhirVersion=4.0.1",
-      "location": "https://shl.example.com/api/shl/file/abc.1735689599.hmac...",
+      "location": "https://shl2-files.s3.amazonaws.com/shl-files/abc123/.../...?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=...",
       "lastUpdated": "2025-01-15T10:30:00Z"
     },
     {
@@ -229,10 +229,12 @@ For files with a `location` URL (not embedded):
 GET {location}
 ```
 
+The `location` is an **S3 presigned URL** — the GET request goes directly to AWS S3 (not through the SHL server).
+
 Response Content-Type: `application/jose`
 Response Body: JWE compact serialization string
 
-**Important:** Location URLs expire within 1 hour. Fetch them promptly.
+**Important:** Presigned URLs expire within 1 hour. Fetch them promptly.
 
 ### Step 4: Decrypt Content
 
@@ -335,7 +337,7 @@ payload = json.loads(base64.urlsafe_b64decode(payload_b64 + "=="))
 manifest = requests.post(payload["url"], json={"recipient": "Test Consumer"}).json()
 for file in manifest["files"]:
     if file.get("location"):
-        jwe = requests.get(file["location"]).text
+        jwe = requests.get(file["location"]).text  # S3 presigned URL
         # Decrypt with payload["key"] using JWE library
 ```
 

@@ -17,17 +17,13 @@
               │              │              │
               └──────────────┼──────────────┘
                              │
-              ┌──────────────┼──────────────┐
-              │              │              │
-        ┌─────┴─────┐ ┌─────┴─────┐ ┌─────┴─────┐
-        │  MongoDB   │ │  MongoDB   │ │  MongoDB   │
-        │ (Primary)  │ │(Secondary) │ │(Secondary) │
-        └────────────┘ └────────────┘ └────────────┘
-                             │
-                    ┌────────┴────────┐
-                    │  AWS HealthLake  │
-                    │   (FHIR R4)     │
-                    └─────────────────┘
+         ┌───────────┬───────┼───────┬───────────┐
+         │           │       │       │           │
+   ┌─────┴─────┐ ┌──┴──┐ ┌──┴──┐ ┌──┴──────┐ ┌──┴───────────┐
+   │  MongoDB   │ │ S3  │ │Dyn- │ │ Health- │ │  S3 (Glacier) │
+   │ (metadata) │ │(JWE │ │amo- │ │  Lake   │ │  (expired     │
+   │            │ │files)│ │ DB  │ │(FHIR R4)│ │   files)      │
+   └────────────┘ └─────┘ └─────┘ └─────────┘ └──────────────┘
 ```
 
 ---
@@ -48,7 +44,7 @@ The application is **stateless** — all state lives in MongoDB. Horizontal scal
 
 - **WebFlux** uses non-blocking I/O with small thread pools (default: CPU cores x 2 Netty event loop threads)
 - **BCrypt** verification and **QR code generation** run on `boundedElastic` scheduler (thread pool for blocking operations, default: 10 x CPU cores, max 100K)
-- **Large DocumentReference** bundles with embedded PDFs can consume significant memory during encryption. For bundles >10MB, consider streaming encryption (future enhancement).
+- **Large DocumentReference** bundles with embedded PDFs can consume significant memory during encryption and S3 upload. For bundles >10MB, consider streaming encryption (future enhancement).
 - JVM heap recommendation: `-Xmx1536m` for production pods with typical workloads.
 
 ### MongoDB
@@ -95,11 +91,12 @@ ENTRYPOINT ["java", "-jar", "app.jar"]
 |---|---|---|
 | `MONGODB_URI` | Yes | MongoDB connection string with credentials |
 | `SHL_BASE_URL` | Yes | Public-facing HTTPS URL (e.g., `https://shl.example.com`) |
-| `SHL_SIGNING_SECRET` | Yes | 32+ char secret for HMAC-signed file URLs |
 | `SHC_ISSUER_URL` | Yes | HTTPS URL for SHC issuer (must match `.well-known/jwks.json` host) |
 | `SHC_SIGNING_KEY_PATH` | Yes | Path to EC P-256 JWK file (e.g., `file:/secrets/shc-signing.jwk`) |
-| `AWS_REGION` | Yes | AWS region for HealthLake |
+| `AWS_REGION` | Yes | AWS region for HealthLake, S3, DynamoDB |
 | `AWS_HEALTHLAKE_DATASTORE_ID` | Yes | HealthLake datastore ID |
+| `SHL_S3_BUCKET` | Yes | S3 bucket for encrypted files (default: `shl2-files`) |
+| `SHL_DYNAMO_ACCESS_LOG_TABLE` | Yes | DynamoDB table for access logs (default: `shl2-access-logs`) |
 | `AWS_ACCESS_KEY_ID` | Conditional | If not using IAM roles |
 | `AWS_SECRET_ACCESS_KEY` | Conditional | If not using IAM roles |
 
@@ -140,17 +137,16 @@ spec:
               key: mongodb-uri
         - name: SHL_BASE_URL
           value: "https://shl.example.com"
-        - name: SHL_SIGNING_SECRET
-          valueFrom:
-            secretKeyRef:
-              name: shl2-secrets
-              key: signing-secret
         - name: SHC_ISSUER_URL
           value: "https://shl.example.com"
         - name: SHC_SIGNING_KEY_PATH
           value: "file:/secrets/shc-signing.jwk"
         - name: AWS_HEALTHLAKE_DATASTORE_ID
           value: "your-datastore-id"
+        - name: SHL_S3_BUCKET
+          value: "shl2-files"
+        - name: SHL_DYNAMO_ACCESS_LOG_TABLE
+          value: "shl2-access-logs"
         volumeMounts:
         - name: signing-key
           mountPath: /secrets
@@ -238,6 +234,9 @@ If HealthLake returns 429s:
 | Load Balancer | App Pods | HTTP | 8080 |
 | App Pods | MongoDB | TCP | 27017 |
 | App Pods | HealthLake | HTTPS | 443 |
+| App Pods | S3 | HTTPS | 443 |
+| App Pods | DynamoDB | HTTPS | 443 |
+| External (consumers) | S3 (presigned URLs) | HTTPS | 443 |
 | External | Load Balancer | HTTPS | 443 |
 | External | `.well-known/jwks.json` | HTTPS | 443 |
 
@@ -264,7 +263,6 @@ Management endpoints (`ShlManagementController`) do NOT have CORS — they shoul
 | Secret | Storage Recommendation | Rotation |
 |---|---|---|
 | MongoDB credentials | K8s Secret / AWS Secrets Manager | 90 days |
-| `SHL_SIGNING_SECRET` | K8s Secret / AWS Secrets Manager | 180 days (coordinate with URL expiry) |
 | EC P-256 signing key | K8s Secret / AWS Secrets Manager / HSM | Yearly (add new key to JWKS, keep old for verification) |
 | AWS credentials | IAM Role (preferred) / K8s Secret | Per IAM policy |
 
@@ -285,15 +283,19 @@ When rotating the SHC signing key:
 | Component | Backup Method | RPO | RTO |
 |---|---|---|---|
 | MongoDB | Continuous backup (Atlas) or daily snapshots | 1 hour | 1 hour |
+| S3 | Cross-region replication (optional) | 0 (11 9's durability) | Minutes |
+| DynamoDB | PITR (enabled for compliance) | 5 minutes | Minutes |
 | Signing key | Stored in 2+ secrets managers | 0 | Minutes |
 | Application config | Git (env vars in K8s manifests) | 0 | Minutes |
 
 ### Data Loss Impact
 
 - **ShlDocument lost**: Affected SHLs become inaccessible (404). Patients must create new links.
-- **ShlFileDocument lost**: Affected SHLs return empty manifests. Refresh (L-flag) re-populates. Non-L SHLs need recreation.
+- **ShlFileDocument lost**: Affected SHLs return empty manifests. Refresh (L-flag) re-populates. Non-L SHLs need recreation. S3 objects remain but are orphaned.
+- **S3 objects lost**: Affected SHLs return empty content. Refresh (L-flag) re-creates. Non-L SHLs need recreation.
+- **DynamoDB data lost**: Access log history lost. Restore from PITR. No impact on SHL functionality.
 - **Signing key lost**: Cannot issue new SHCs. Existing SHCs remain verifiable if public key is cached by verifiers. Generate new key pair.
-- **HealthLake unavailable**: SHL creation and refresh fail with 502. Existing SHLs continue to work (files already in MongoDB).
+- **HealthLake unavailable**: SHL creation and refresh fail with 502. Existing SHLs continue to work (files already in S3).
 
 ---
 
@@ -301,9 +303,9 @@ When rotating the SHC signing key:
 
 | Operation | Expected Latency | Bottleneck |
 |---|---|---|
-| Create SHL (3 categories) | 2-5s | HealthLake fetch |
-| Manifest lookup | <50ms | MongoDB query |
-| File download (signed URL) | <50ms | MongoDB query |
+| Create SHL (3 categories) | 2-5s | HealthLake fetch + S3 upload |
+| Manifest lookup | <50ms | MongoDB query + S3 presign (local crypto) |
+| File download (presigned URL) | <100ms | S3 (direct, no server proxy) |
 | QR code generation | 100-200ms | ZXing CPU-bound |
 | BCrypt passcode verify | 100-300ms | CPU-bound (intentional) |
 | SHC signing | <50ms | ES256 is fast |

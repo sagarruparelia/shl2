@@ -13,7 +13,7 @@ SHL2 implements a **zero-knowledge architecture** for stored health data: the se
 Every FHIR bundle and Smart Health Card is encrypted before storage.
 
 ```
-Plaintext (FHIR JSON) -> JWE (AES-256-GCM) -> MongoDB
+Plaintext (FHIR JSON) -> JWE (AES-256-GCM) -> S3 (SSE-S3)
 
 JWE Header: {
   "alg": "dir",           // Direct key agreement (symmetric)
@@ -136,21 +136,19 @@ BCrypt verification runs on `Schedulers.boundedElastic()` to avoid blocking the 
 
 ## File URL Security
 
-Manifest responses include `location` URLs for file download. These are protected by HMAC-signed tokens:
+Manifest responses include `location` URLs for file download. These are **S3 presigned URLs** — signed by AWS SigV4:
 
 ```
-URL format: /api/shl/file/{fileId}.{expiryEpoch}.{hmac}
-
-HMAC = HMAC-SHA256(
-  key:  SHL_SIGNING_SECRET,
-  data: "{fileId}.{expiryEpoch}"
-)
+URL format: https://{bucket}.s3.amazonaws.com/{key}?X-Amz-Algorithm=AWS4-HMAC-SHA256
+  &X-Amz-Credential=...&X-Amz-Date=...&X-Amz-Expires=3600
+  &X-Amz-SignedHeaders=host&X-Amz-Signature=...
 ```
 
 **Protections:**
 - **Expiry**: URLs expire after `fileUrlExpirySeconds` (default 3600 = 1 hour, per SHL spec maximum)
-- **Integrity**: HMAC prevents tampering with fileId or expiry
-- **Constant-time comparison**: `MessageDigest.isEqual()` prevents timing attacks
+- **Integrity**: AWS SigV4 prevents tampering with any URL component
+- **No server proxy**: Consumers download directly from S3, reducing server bandwidth and attack surface
+- **IAM-scoped**: Presigned URLs are generated with the server's IAM credentials and scoped to the specific object
 
 ---
 
@@ -218,7 +216,7 @@ Only the public key (without `d`) is exposed at `/.well-known/jwks.json`:
 | **A04: Insecure Design** | Zero-knowledge storage; per-SHL keys; atomic passcode tracking |
 | **A05: Security Misconfiguration** | Minimal config surface (single properties file); no unnecessary endpoints |
 | **A06: Vulnerable Components** | nimbus-jose-jwt 10.0.2 (patches CVE-2025-53864); ZXing 3.5.3 (no known CVEs) |
-| **A07: Auth Failures** | BCrypt with attempt limiting; constant-time HMAC comparison |
+| **A07: Auth Failures** | BCrypt with attempt limiting; S3 presigned URLs via AWS SigV4 |
 | **A08: Data Integrity** | JWE provides authenticated encryption; JWS provides tamper detection |
 | **A09: Logging Failures** | Structured logging of security events; PHI excluded from logs |
 | **A10: SSRF** | HealthLake URL constructed from config only (not user input); Binary URLs validated against pattern |
@@ -227,10 +225,10 @@ Only the public key (without `d`) is exposed at `/.well-known/jwks.json`:
 
 | Threat | Mitigation |
 |---|---|
-| **Database compromise** | All FHIR data JWE-encrypted; key in SHL URI, not exposed separately |
+| **Database compromise** | MongoDB stores only metadata (no encrypted content). S3 stores JWE-encrypted data with SSE-S3. Key in SHL URI, not exposed separately |
 | **Network interception** | TLS 1.2+ required; encryption key in SHL fragment (not in server logs) |
-| **Replay attack on file URLs** | 1-hour HMAC-signed expiry |
-| **Timing attack on passcode** | BCrypt is constant-time by design; HMAC uses `MessageDigest.isEqual()` |
+| **Replay attack on file URLs** | 1-hour S3 presigned URL expiry (AWS SigV4) |
+| **Timing attack on passcode** | BCrypt is constant-time by design |
 | **Denial of service** | WebFlux non-blocking model handles high concurrency; BCrypt on bounded scheduler prevents thread starvation |
 | **QR code shoulder surfing** | Optional passcode protection; patient controls physical QR distribution |
 
@@ -242,7 +240,7 @@ Only the public key (without `d`) is exposed at `/.well-known/jwks.json`:
 |---|---|---|---|
 | nimbus-jose-jwt | 10.0.2 | Patched (CVE-2025-53864) | JWE/JWS library |
 | ZXing | 3.5.3 | No known CVEs | QR code generation |
-| AWS SDK auth | 2.31.1 | Current | SigV4 signing |
+| AWS SDK (auth, s3, dynamodb) | 2.31.1 | Current | SigV4 signing, S3 storage, DynamoDB access logs |
 | Spring Security Crypto | (managed by Boot) | Current | BCrypt only |
 | Spring Boot | 4.0.2 | Current | Framework |
 | MongoDB Driver | (managed by Boot) | Current | Database driver |

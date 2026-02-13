@@ -73,28 +73,32 @@ Example Condition resource:
 }
 ```
 
-### Storage Format (in MongoDB)
+### Storage Format (S3 + MongoDB)
 
-FHIR data is **never stored as plaintext** in MongoDB. The flow:
+FHIR data is **never stored as plaintext**. The flow:
 
 ```
 FHIR Bundle (JSON)
   -> JWE encrypt (AES-256-GCM, with cty header)
-  -> Store as string in ShlFileDocument.encryptedContent
+  -> Upload to S3 (key: shl-files/{shlId}/{uuid})
+  -> Save metadata to MongoDB (s3Key + contentLength, no content)
 ```
 
-The `ShlFileDocument` schema:
+The `ShlFileDocument` schema (MongoDB — metadata only):
 
 ```json
 {
   "_id": "ObjectId",
   "shlId": "reference to ShlDocument._id",
   "contentType": "application/fhir+json;fhirVersion=4.0.1",
-  "encryptedContent": "eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIiwiY3R5IjoiYXBwbGljYXRpb24vZmhpcitqc29uO2ZoaXJWZXJzaW9uPTQuMC4xIn0...",
+  "s3Key": "shl-files/abc123/550e8400-e29b-41d4-a716-446655440000",
+  "contentLength": 34000,
   "lastUpdated": "2025-01-15T10:30:00Z",
   "createdAt": "2025-01-15T10:30:00Z"
 }
 ```
+
+The encrypted content (JWE compact serialization) is stored in S3 with `application/jose` content type and SSE-S3 encryption.
 
 ### Output Formats (to consumers)
 
@@ -245,14 +249,113 @@ When generating SMART Health Cards, the FHIR Bundle is minified per the SHC spec
 
 ```
 {
-  _id:               ObjectId (auto)
-  shlId:             String  (indexed, references shls._id)
-  contentType:       String  ("application/fhir+json;fhirVersion=4.0.1" | "application/smart-health-card")
-  encryptedContent:  String  (JWE compact serialization, potentially large)
-  lastUpdated:       ISODate
-  createdAt:         ISODate
+  _id:            ObjectId (auto)
+  shlId:          String  (indexed, references shls._id)
+  contentType:    String  ("application/fhir+json;fhirVersion=4.0.1" | "application/smart-health-card")
+  s3Key:          String  (S3 object key, e.g. "shl-files/{shlId}/{uuid}")
+  contentLength:  Long    (byte length of encrypted content in S3)
+  lastUpdated:    ISODate
+  createdAt:      ISODate
 }
 ```
+
+Note: Encrypted content is no longer stored in MongoDB. The `s3Key` field points to the S3 object containing the JWE compact serialization. `contentLength` enables the embed-vs-presign decision without an S3 HEAD request.
+
+---
+
+## S3 Storage — `shl2-files` Bucket
+
+### Object Structure
+
+```
+shl-files/
+  {shlId}/
+    {uuid-1}    <- JWE encrypted FHIR bundle (application/jose)
+    {uuid-2}    <- JWE encrypted SHC (application/jose)
+    ...
+```
+
+### Configuration
+
+| Setting | Value |
+|---|---|
+| Bucket name | Configurable via `SHL_S3_BUCKET` (default: `shl2-files`) |
+| Encryption | SSE-S3 (defense in depth — content is already JWE-encrypted) |
+| Public access | Blocked (all access via presigned URLs) |
+| Versioning | Disabled |
+| Content type | `application/jose` |
+
+### Lifecycle Rules
+
+```
+Rule: "archive-expired-files"
+  Filter:     Tag "expirationDate" exists
+  Transition: S3 Glacier Flexible Retrieval after expiration date
+```
+
+Files are tagged with `expirationDate` at upload time (when the SHL has an expiration). S3 lifecycle rules automatically transition expired files to Glacier for cold storage.
+
+### Access Pattern
+
+All file access from consumers goes through S3 presigned URLs (1-hour expiry). The SHL server never proxies file content — it only generates presigned URLs and returns them in manifest responses.
+
+---
+
+## DynamoDB — `shl2-access-logs` Table
+
+### Schema
+
+```
+Table: shl2-access-logs
+  Partition Key:  patientId (String)
+  Sort Key:       sortKey (String) — format: "ISO-8601#UUID"
+
+GSI: shlId-index
+  Partition Key:  shlId (String)
+  Sort Key:       accessedAt (String)
+  Projection:     ALL
+```
+
+### Item Structure
+
+```json
+{
+  "patientId": "patient-123",
+  "sortKey": "2025-01-15T10:30:00Z#550e8400-e29b-41d4-a716-446655440000",
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "shlId": "abc123",
+  "manifestId": "def456...",
+  "recipient": "Dr. Smith",
+  "accessType": "MANIFEST",
+  "accessedAt": "2025-01-15T10:30:00Z"
+}
+```
+
+### Configuration
+
+| Setting | Value |
+|---|---|
+| Table name | Configurable via `SHL_DYNAMO_ACCESS_LOG_TABLE` (default: `shl2-access-logs`) |
+| Table class | Standard-Infrequent Access (60% cheaper storage) |
+| Billing mode | Pay-per-request |
+| PITR | Enabled (compliance) |
+| TTL | None (10-year CMS retention) |
+| Streams | Enabled (NEW_IMAGE) for future analytics pipeline |
+
+### Query Patterns
+
+| Operation | Access Pattern | Key Used |
+|---|---|---|
+| Log access event | PutItem | `patientId` + `sortKey` |
+| Member access log | Query on table, `scanIndexForward=false` | `patientId` (descending) |
+| Per-SHL access log | Query on `shlId-index` GSI | `shlId` (descending by `accessedAt`) |
+
+### Sizing Estimates
+
+At 5M patients / 1B log entries:
+- Storage: ~$20/mo (Standard-IA)
+- Writes: Pay-per-request, ~$1.25 per million writes
+- Reads: Pay-per-request, ~$0.25 per million reads
 
 ### Sizing Estimates
 
@@ -266,13 +369,18 @@ When generating SMART Health Cards, the FHIR Bundle is minified per the SHC spec
 
 ### Query Patterns
 
-| Operation | Query | Index Used |
-|---|---|---|
-| Manifest lookup | `findByManifestId(id)` | `manifestId` (unique) |
-| Management lookup | `findByManagementToken(token)` | `managementToken` (unique) |
-| File listing | `findByShlId(shlId)` | `shlId` |
-| Passcode decrement | `findAndModify(manifestId, $inc: -1)` | `manifestId` |
-| Cleanup | `deleteByShlId(shlId)` | `shlId` |
+| Operation | Query | Store | Index Used |
+|---|---|---|---|
+| Manifest lookup | `findByManifestId(id)` | MongoDB | `manifestId` (unique) |
+| Management lookup | `findByManagementToken(token)` | MongoDB | `managementToken` (unique) |
+| File metadata listing | `findByShlId(shlId)` | MongoDB | `shlId` |
+| File content download | `GetObject(s3Key)` | S3 | S3 key |
+| File content presign | `presignGetObject(s3Key)` | S3 | S3 key |
+| Passcode decrement | `findAndModify(manifestId, $inc: -1)` | MongoDB | `manifestId` |
+| File cleanup | `deleteByShlId(shlId)` + `deleteByPrefix(prefix)` | MongoDB + S3 | `shlId` / S3 prefix |
+| Log access | `PutItem(patientId, sortKey)` | DynamoDB | Table PK |
+| Member access log | `Query(patientId)` | DynamoDB | Table PK |
+| Per-SHL access log | `Query(shlId)` | DynamoDB | `shlId-index` GSI |
 
 ---
 
@@ -310,17 +418,24 @@ The system depends on HealthLake supporting these FHIR R4 interactions:
 
 ```
 Creation:
-  HealthLake -> Fetch FHIR -> Encrypt -> MongoDB (shl_files)
+  HealthLake -> Fetch FHIR -> Encrypt -> S3 (JWE content) + MongoDB (metadata)
 
-Access:
-  MongoDB (shl_files) -> Return encrypted -> Consumer decrypts
+Access (embed path):
+  MongoDB (file metadata) -> check contentLength -> S3 download -> embed in response
+
+Access (presign path):
+  MongoDB (file metadata) -> generate S3 presigned URL -> consumer fetches from S3 directly
 
 Refresh (L-flag):
-  Delete old shl_files -> HealthLake -> Fetch FHIR -> Encrypt -> MongoDB (shl_files)
+  Delete S3 objects by prefix -> Delete MongoDB shl_files -> HealthLake -> Encrypt -> S3 + MongoDB
 
 Revocation:
-  Set shls.status = REVOKED (files remain encrypted, inaccessible via protocol)
+  Set shls.status = REVOKED (files remain encrypted in S3, inaccessible via protocol)
 
 Expiration:
   Checked at access time (shls.expirationTime vs. current time)
+  S3 lifecycle rule transitions expired files to Glacier
+
+Access Logging:
+  Every manifest/direct access -> DynamoDB PutItem (fire-and-forget, 10-year retention)
 ```

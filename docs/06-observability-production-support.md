@@ -16,6 +16,8 @@ GET /actuator/prometheus    # Prometheus scrape endpoint (if micrometer-registry
 | Indicator | What it Checks | Impact if Down |
 |---|---|---|
 | MongoDB | Connection to MongoDB | All operations fail |
+| S3 | Connection to S3 bucket | File upload/download fail; manifest embed/presign fail |
+| DynamoDB | Connection to DynamoDB table | Access log writes fail (fire-and-forget, non-blocking) |
 | Disk Space | Available disk | Log writes fail |
 | HealthLake | (Custom — should be added) | SHL creation and refresh fail; existing SHLs unaffected |
 
@@ -52,6 +54,12 @@ management:
 | `shl.healthlake.errors` | Counter | >5/min | HealthLake upstream failures |
 | `shl.healthlake.duration` | Timer | p99 > 5s | HealthLake fetch latency |
 | `shl.encryption.duration` | Timer | p99 > 500ms | JWE encryption time |
+| `shl.s3.upload.duration` | Timer | p99 > 2s | S3 upload latency |
+| `shl.s3.download.duration` | Timer | p99 > 1s | S3 download latency |
+| `shl.s3.errors` | Counter | >5/min | S3 operation failures |
+| `shl.dynamodb.write.duration` | Timer | p99 > 500ms | DynamoDB PutItem latency |
+| `shl.dynamodb.query.duration` | Timer | p99 > 500ms | DynamoDB query latency |
+| `shl.dynamodb.errors` | Counter | >5/min | DynamoDB operation failures |
 | `shl.qr.generation.duration` | Timer | p99 > 1s | QR code generation time |
 
 ### MongoDB Metrics
@@ -108,7 +116,9 @@ logging:
 | SHL revoked | INFO | `event=shl_revoked, managementToken` |
 | SHL refreshed | INFO | `event=shl_refreshed, managementToken` |
 | Manifest accessed | INFO | `event=manifest_accessed, manifestId, recipient, status` |
-| File downloaded | INFO | `event=file_downloaded, fileId` |
+| File downloaded | INFO | `event=file_downloaded, s3Key` |
+| S3 upload | DEBUG | `event=s3_upload, s3Key, contentLength` |
+| DynamoDB write | DEBUG | `event=dynamo_write, patientId, shlId, accessType` |
 | Passcode failed | WARN | `event=passcode_failed, manifestId, remainingAttempts` |
 | Passcode exhausted | WARN | `event=passcode_exhausted, manifestId` |
 | HealthLake error | ERROR | `event=healthlake_error, patientId, category, errorMessage` |
@@ -238,9 +248,18 @@ logging:
 - Error rate by category
 - Throttling events (429s)
 
+### S3 & DynamoDB Dashboard
+- S3 upload/download latency
+- S3 storage usage by prefix
+- S3 presigned URL generation rate
+- DynamoDB write/query latency
+- DynamoDB consumed capacity units
+- DynamoDB item count growth
+
 ### Capacity Dashboard
 - MongoDB disk usage
 - MongoDB operation rate
+- S3 bucket size and object count
+- DynamoDB table size
 - JVM heap usage
 - Pod CPU/memory utilization
-- ShlFileDocument average size

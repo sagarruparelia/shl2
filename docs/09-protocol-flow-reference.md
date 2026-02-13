@@ -34,7 +34,9 @@ Patient App          SHL Server           HealthLake         MongoDB
     │                    │ JWE encrypt each   │                 │
     │                    │  bundle            │                 │
     │                    │                    │                 │
+    │                    │ Upload to S3          │                 │
     │                    │ Save ShlFileDocuments ─────────────> │
+    │                    │  (metadata + s3Key)   │                 │
     │                    │                    │                 │
     │                    │ Encode shlink:/ URI│                 │
     │                    │                    │                 │
@@ -48,54 +50,54 @@ Patient App          SHL Server           HealthLake         MongoDB
 ### Flow 2: Provider Consumes SHL
 
 ```
-Provider EHR         SHL Server                              MongoDB
-    │                    │                                      │
-    │ Scan QR / paste    │                                      │
-    │ shlink:/...        │                                      │
-    │                    │                                      │
-    │ Decode base64url   │                                      │
-    │ -> {url, key, ...} │                                      │
-    │                    │                                      │
-    │ POST {url}         │                                      │
-    │ {recipient:        │                                      │
-    │  "Dr. Smith"}      │                                      │
-    │ ──────────────────>│                                      │
-    │                    │ findByManifestId ────────────────────>│
-    │                    │ <── ShlDocument ─────────────────────│
-    │                    │                                      │
-    │                    │ Validate: not revoked, not expired   │
-    │                    │                                      │
-    │                    │ findByShlId ─────────────────────────>│
-    │                    │ <── ShlFileDocuments ────────────────│
-    │                    │                                      │
-    │                    │ For each file:                       │
-    │                    │   if size <= embeddedLengthMax:      │
-    │                    │     embed JWE inline                 │
-    │                    │   else:                              │
-    │                    │     generate signed location URL     │
-    │                    │                                      │
-    │ <── 200 OK ───────│                                      │
-    │ {status:"finalized"│                                      │
-    │  files:[           │                                      │
-    │   {contentType,    │                                      │
-    │    location:       │                                      │
-    │    "https://..."}  │                                      │
-    │  ]}                │                                      │
-    │                    │                                      │
-    │ GET {location}     │                                      │
-    │ ──────────────────>│                                      │
-    │                    │ Verify HMAC + expiry                 │
-    │                    │ findById(fileId) ────────────────────>│
-    │                    │ <── ShlFileDocument ─────────────────│
-    │ <── application/   │                                      │
-    │     jose (JWE) ───│                                      │
-    │                    │                                      │
-    │ Decrypt JWE with   │                                      │
-    │ key from shlink:/  │                                      │
-    │ -> FHIR Bundle     │                                      │
-    │                    │                                      │
-    │ Display patient    │                                      │
-    │ records in EHR     │                                      │
+Provider EHR         SHL Server                     MongoDB        S3
+    │                    │                              │            │
+    │ Scan QR / paste    │                              │            │
+    │ shlink:/...        │                              │            │
+    │                    │                              │            │
+    │ Decode base64url   │                              │            │
+    │ -> {url, key, ...} │                              │            │
+    │                    │                              │            │
+    │ POST {url}         │                              │            │
+    │ {recipient:        │                              │            │
+    │  "Dr. Smith"}      │                              │            │
+    │ ──────────────────>│                              │            │
+    │                    │ findByManifestId ────────────>│            │
+    │                    │ <── ShlDocument ─────────────│            │
+    │                    │                              │            │
+    │                    │ Validate: not revoked, not expired       │
+    │                    │                              │            │
+    │                    │ findByShlId ─────────────────>│            │
+    │                    │ <── ShlFileDocuments ────────│            │
+    │                    │   (metadata + s3Key)         │            │
+    │                    │                              │            │
+    │                    │ For each file:               │            │
+    │                    │   if contentLength <= max:   │            │
+    │                    │     download from S3 ────────────────────>│
+    │                    │     <── JWE content ─────────────────────│
+    │                    │     embed inline             │            │
+    │                    │   else:                      │            │
+    │                    │     generate S3 presigned URL│            │
+    │                    │                              │            │
+    │ <── 200 OK ───────│                              │            │
+    │ {status:"finalized"│                              │            │
+    │  files:[           │                              │            │
+    │   {contentType,    │                              │            │
+    │    location:       │                              │            │
+    │    "https://s3..."} │                             │            │
+    │  ]}                │                              │            │
+    │                    │                              │            │
+    │ GET {location}     │                              │            │
+    │ ─────────────────────────────────────────────────────────────>│
+    │ <── application/jose (JWE) ──────────────────────────────────│
+    │  (direct from S3)  │                              │            │
+    │                    │                              │            │
+    │ Decrypt JWE with   │                              │            │
+    │ key from shlink:/  │                              │            │
+    │ -> FHIR Bundle     │                              │            │
+    │                    │                              │            │
+    │ Display patient    │                              │            │
+    │ records in EHR     │                              │            │
 ```
 
 ### Flow 3: Passcode-Protected SHL
@@ -132,58 +134,64 @@ Provider EHR         SHL Server                              MongoDB
 ### Flow 4: U-Flag Direct Access
 
 ```
-Provider EHR         SHL Server                              MongoDB
-    │                    │                                      │
-    │ Decode shlink:/    │                                      │
-    │ -> {url, key,      │                                      │
-    │     flag: "U"}     │                                      │
-    │                    │                                      │
-    │ GET {url}?         │                                      │
-    │  recipient=Dr.+S   │                                      │
-    │ ──────────────────>│                                      │
-    │                    │ findByManifestId ────────────────────>│
-    │                    │ <── ShlDocument ─────────────────────│
-    │                    │                                      │
-    │                    │ Validate status                      │
-    │                    │                                      │
-    │                    │ findByShlId().next() ────────────────>│
-    │                    │ <── Single ShlFileDocument ──────────│
-    │                    │                                      │
-    │ <── application/   │                                      │
-    │     jose (JWE) ───│                                      │
-    │                    │                                      │
-    │ Decrypt -> FHIR    │                                      │
+Provider EHR         SHL Server                     MongoDB        S3
+    │                    │                              │            │
+    │ Decode shlink:/    │                              │            │
+    │ -> {url, key,      │                              │            │
+    │     flag: "U"}     │                              │            │
+    │                    │                              │            │
+    │ GET {url}?         │                              │            │
+    │  recipient=Dr.+S   │                              │            │
+    │ ──────────────────>│                              │            │
+    │                    │ findByManifestId ────────────>│            │
+    │                    │ <── ShlDocument ─────────────│            │
+    │                    │                              │            │
+    │                    │ Validate status              │            │
+    │                    │                              │            │
+    │                    │ findByShlId().next() ────────>│            │
+    │                    │ <── ShlFileDocument ─────────│            │
+    │                    │   (s3Key)                    │            │
+    │                    │                              │            │
+    │                    │ Download from S3 ────────────────────────>│
+    │                    │ <── JWE content ─────────────────────────│
+    │                    │                              │            │
+    │ <── application/   │                              │            │
+    │     jose (JWE) ───│                              │            │
+    │                    │                              │            │
+    │ Decrypt -> FHIR    │                              │            │
 ```
 
 ### Flow 5: L-Flag Data Refresh
 
 ```
-Patient App          SHL Server           HealthLake         MongoDB
-    │                    │                    │                 │
-    │ POST /manage/      │                    │                 │
-    │  {token}/refresh   │                    │                 │
-    │ ──────────────────>│                    │                 │
-    │                    │ findByMgmtToken ──────────────────> │
-    │                    │ <── ShlDocument (L flag) ──────────  │
-    │                    │                    │                 │
-    │                    │ deleteByShlId ────────────────────> │
-    │                    │  (old files)       │                 │
-    │                    │                    │                 │
-    │                    │ Fetch fresh FHIR──>│                 │
-    │                    │ <── Bundles ──────│                 │
-    │                    │                    │                 │
-    │                    │ JWE encrypt (same  │                 │
-    │                    │  key as before)    │                 │
-    │                    │                    │                 │
-    │                    │ Save new files ──────────────────> │
-    │                    │ Update timestamp ─────────────────> │
-    │                    │                    │                 │
-    │ <── 204 ──────────│                    │                 │
-    │                    │                    │                 │
-    │ Next time provider │                    │                 │
-    │ fetches manifest:  │                    │                 │
-    │ status="can-change"│                    │                 │
-    │ files=new data     │                    │                 │
+Patient App          SHL Server           HealthLake    MongoDB      S3
+    │                    │                    │            │           │
+    │ POST /manage/      │                    │            │           │
+    │  {token}/refresh   │                    │            │           │
+    │ ──────────────────>│                    │            │           │
+    │                    │ findByMgmtToken ──────────────>│           │
+    │                    │ <── ShlDocument (L flag) ──────│           │
+    │                    │                    │            │           │
+    │                    │ Delete S3 objects by prefix ───────────── >│
+    │                    │ deleteByShlId ─────────────────>│          │
+    │                    │  (old metadata)    │            │           │
+    │                    │                    │            │           │
+    │                    │ Fetch fresh FHIR──>│            │           │
+    │                    │ <── Bundles ──────│            │           │
+    │                    │                    │            │           │
+    │                    │ JWE encrypt (same  │            │           │
+    │                    │  key as before)    │            │           │
+    │                    │                    │            │           │
+    │                    │ Upload to S3 ──────────────────────────── >│
+    │                    │ Save new metadata ─────────────>│          │
+    │                    │ Update timestamp ──────────────>│          │
+    │                    │                    │            │           │
+    │ <── 204 ──────────│                    │            │           │
+    │                    │                    │            │           │
+    │ Next time provider │                    │            │           │
+    │ fetches manifest:  │                    │            │           │
+    │ status="can-change"│                    │            │           │
+    │ files=new data     │                    │            │           │
 ```
 
 ### Flow 6: SHC Verification
@@ -235,10 +243,11 @@ Verifier App         SHL Server
 
 | Method | Path | Request | Response | Auth |
 |---|---|---|---|---|
-| POST | `/api/shl/manifest/{manifestId}` | `{recipient, passcode?, embeddedLengthMax?}` | `{status, files[]}` | manifestId entropy + optional passcode |
-| GET | `/api/shl/file/{signedToken}` | - | `application/jose` body | HMAC-signed URL |
-| GET | `/api/shl/direct/{manifestId}?recipient=...` | - | `application/jose` body | manifestId entropy (U-flag only) |
+| POST | `/api/shl/manifest/{manifestId}` | `{recipient, passcode?, embeddedLengthMax?}` | `{status, files[]}` (locations are S3 presigned URLs) | manifestId entropy + optional passcode |
+| GET | `/api/shl/direct/{manifestId}?recipient=...` | - | `application/jose` body (downloaded from S3) | manifestId entropy (U-flag only) |
 | GET | `/.well-known/jwks.json` | - | `{keys: [...]}` | None |
+
+Note: File downloads go directly to S3 via presigned URLs in the manifest `location` field. There is no server-side file download endpoint.
 
 ### Management Endpoints (Internal)
 
