@@ -6,7 +6,6 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public record ShlProperties(
         String baseUrl,
         int fileUrlExpirySeconds,
-        String signingSecret,
         int defaultPasscodeAttempts,
         Shc shc,
         Aws aws
@@ -18,6 +17,8 @@ public record ShlProperties(
 
     public record Aws(
             String region,
-            String healthlakeDatastoreId
+            String healthlakeDatastoreId,
+            String s3BucketName,
+            String dynamoAccessLogTable
     ) {}
 }

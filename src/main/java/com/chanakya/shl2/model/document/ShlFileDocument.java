@@ -24,7 +24,8 @@ public class ShlFileDocument {
     private String shlId;
 
     private String contentType;
-    private String encryptedContent; // JWE compact serialization
+    private String s3Key;
+    private long contentLength;
 
     private Instant lastUpdated;
     private Instant createdAt;

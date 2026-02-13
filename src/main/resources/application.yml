@@ -9,7 +9,6 @@ spring:
 shl:
   base-url: ${SHL_BASE_URL:http://localhost:8080}
   file-url-expiry-seconds: 3600
-  signing-secret: ${SHL_SIGNING_SECRET:change-in-prod-min-32-chars!!!!}
   default-passcode-attempts: 5
   shc:
     issuer-url: ${SHC_ISSUER_URL:https://shl.example.com}
@@ -17,3 +16,5 @@ shl:
   aws:
     region: ${AWS_REGION:us-east-1}
     healthlake-datastore-id: ${AWS_HEALTHLAKE_DATASTORE_ID:}
+    s3-bucket-name: ${SHL_S3_BUCKET:shl2-files}
+    dynamo-access-log-table: ${SHL_DYNAMO_ACCESS_LOG_TABLE:shl2-access-logs}

@@ -18,9 +18,11 @@ import com.chanakya.shl2.util.EntropyUtil;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.UUID;
 
 @Service
 public class ShlCreationService {
@@ -34,6 +36,7 @@ public class ShlCreationService {
     private final HealthLakeService healthLakeService;
     private final SmartHealthCardService shcService;
     private final QrCodeService qrCodeService;
+    private final S3StorageService s3StorageService;
     private final ShlProperties properties;
 
     public ShlCreationService(ShlRepository shlRepository,
@@ -45,6 +48,7 @@ public class ShlCreationService {
                               HealthLakeService healthLakeService,
                               SmartHealthCardService shcService,
                               QrCodeService qrCodeService,
+                              S3StorageService s3StorageService,
                               ShlProperties properties) {
         this.shlRepository = shlRepository;
         this.fileRepository = fileRepository;
@@ -55,6 +59,7 @@ public class ShlCreationService {
         this.healthLakeService = healthLakeService;
         this.shcService = shcService;
         this.qrCodeService = qrCodeService;
+        this.s3StorageService = s3StorageService;
         this.properties = properties;
     }
 
@@ -173,7 +178,8 @@ public class ShlCreationService {
                     if (!shl.getFlags().contains(ShlFlag.L)) {
                         return Mono.error(new IllegalStateException("Only long-term SHLs can be refreshed"));
                     }
-                    return fileRepository.deleteByShlId(shl.getId())
+                    return s3StorageService.deleteByPrefix("shl-files/" + shl.getId() + "/")
+                            .then(fileRepository.deleteByShlId(shl.getId()))
                             .then(fetchAndEncryptData(shl))
                             .then(Mono.defer(() -> {
                                 shl.setUpdatedAt(Instant.now());
@@ -211,14 +217,19 @@ public class ShlCreationService {
                     .flatMap(bundles -> {
                         String merged = mergeFhirBundles(bundles);
                         String encrypted = jweService.encrypt(merged, shl.getEncryptionKeyBase64(), fhirContentType);
-                        ShlFileDocument fileDoc = ShlFileDocument.builder()
-                                .shlId(shl.getId())
-                                .contentType(fhirContentType)
-                                .encryptedContent(encrypted)
-                                .lastUpdated(Instant.now())
-                                .createdAt(Instant.now())
-                                .build();
-                        return fileRepository.save(fileDoc);
+                        String s3Key = "shl-files/" + shl.getId() + "/" + UUID.randomUUID();
+                        return s3StorageService.upload(s3Key, encrypted, shl.getExpirationTime())
+                                .flatMap(key -> {
+                                    ShlFileDocument fileDoc = ShlFileDocument.builder()
+                                            .shlId(shl.getId())
+                                            .contentType(fhirContentType)
+                                            .s3Key(key)
+                                            .contentLength(encrypted.getBytes(StandardCharsets.UTF_8).length)
+                                            .lastUpdated(Instant.now())
+                                            .createdAt(Instant.now())
+                                            .build();
+                                    return fileRepository.save(fileDoc);
+                                });
                     })
                     .then();
         }
@@ -231,14 +242,19 @@ public class ShlCreationService {
                 )
                 .flatMap(wrapper -> {
                     String encrypted = jweService.encrypt(wrapper.getBundleJson(), shl.getEncryptionKeyBase64(), fhirContentType);
-                    ShlFileDocument fileDoc = ShlFileDocument.builder()
-                            .shlId(shl.getId())
-                            .contentType(fhirContentType)
-                            .encryptedContent(encrypted)
-                            .lastUpdated(Instant.now())
-                            .createdAt(Instant.now())
-                            .build();
-                    return fileRepository.save(fileDoc);
+                    String s3Key = "shl-files/" + shl.getId() + "/" + UUID.randomUUID();
+                    return s3StorageService.upload(s3Key, encrypted, shl.getExpirationTime())
+                            .flatMap(key -> {
+                                ShlFileDocument fileDoc = ShlFileDocument.builder()
+                                        .shlId(shl.getId())
+                                        .contentType(fhirContentType)
+                                        .s3Key(key)
+                                        .contentLength(encrypted.getBytes(StandardCharsets.UTF_8).length)
+                                        .lastUpdated(Instant.now())
+                                        .createdAt(Instant.now())
+                                        .build();
+                                return fileRepository.save(fileDoc);
+                            });
                 })
                 .then(shl.isIncludeHealthCards()
                         ? createHealthCards(shl)
@@ -287,14 +303,19 @@ public class ShlCreationService {
                         .flatMap(shcJson -> {
                             String shcContentType = "application/smart-health-card";
                             String encrypted = jweService.encrypt(shcJson, shl.getEncryptionKeyBase64(), shcContentType);
-                            ShlFileDocument fileDoc = ShlFileDocument.builder()
-                                    .shlId(shl.getId())
-                                    .contentType(shcContentType)
-                                    .encryptedContent(encrypted)
-                                    .lastUpdated(Instant.now())
-                                    .createdAt(Instant.now())
-                                    .build();
-                            return fileRepository.save(fileDoc);
+                            String s3Key = "shl-files/" + shl.getId() + "/" + UUID.randomUUID();
+                            return s3StorageService.upload(s3Key, encrypted, shl.getExpirationTime())
+                                    .flatMap(key -> {
+                                        ShlFileDocument fileDoc = ShlFileDocument.builder()
+                                                .shlId(shl.getId())
+                                                .contentType(shcContentType)
+                                                .s3Key(key)
+                                                .contentLength(encrypted.getBytes(StandardCharsets.UTF_8).length)
+                                                .lastUpdated(Instant.now())
+                                                .createdAt(Instant.now())
+                                                .build();
+                                        return fileRepository.save(fileDoc);
+                                    });
                         }))
                 .then();
     }

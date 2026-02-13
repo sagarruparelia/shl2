@@ -1,11 +1,11 @@
 package com.chanakya.shl2.service;
 
 import com.chanakya.shl2.exception.ShlNotFoundException;
-import com.chanakya.shl2.model.document.AccessLogDocument;
 import com.chanakya.shl2.model.document.ShlDocument;
+import com.chanakya.shl2.model.dynamodb.AccessLogItem;
 import com.chanakya.shl2.model.dto.response.AccessLogEntry;
 import com.chanakya.shl2.model.enums.AccessType;
-import com.chanakya.shl2.repository.AccessLogRepository;
+import com.chanakya.shl2.repository.AccessLogDynamoRepository;
 import com.chanakya.shl2.repository.ShlRepository;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
@@ -14,30 +14,34 @@ import reactor.core.publisher.Mono;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
 
 @Service
 public class AccessLogService {
 
-    private final AccessLogRepository accessLogRepository;
+    private final AccessLogDynamoRepository accessLogRepository;
     private final ShlRepository shlRepository;
 
-    public AccessLogService(AccessLogRepository accessLogRepository, ShlRepository shlRepository) {
+    public AccessLogService(AccessLogDynamoRepository accessLogRepository, ShlRepository shlRepository) {
         this.accessLogRepository = accessLogRepository;
         this.shlRepository = shlRepository;
     }
 
     public Mono<Void> logAccess(ShlDocument shl, String recipient, AccessType accessType) {
-        AccessLogDocument log = AccessLogDocument.builder()
-                .patientId(shl.getPatientId())
-                .shlId(shl.getId())
-                .manifestId(shl.getManifestId())
-                .recipient(recipient)
-                .accessType(accessType)
-                .accessedAt(Instant.now())
-                .build();
+        Instant now = Instant.now();
+        String id = UUID.randomUUID().toString();
+        AccessLogItem item = new AccessLogItem(
+                shl.getPatientId(),
+                AccessLogItem.buildSortKey(now, id),
+                id,
+                shl.getId(),
+                shl.getManifestId(),
+                recipient,
+                accessType,
+                now
+        );
 
-        return accessLogRepository.save(log)
-                .then()
+        return accessLogRepository.save(item)
                 .onErrorComplete();
     }
 
@@ -47,8 +51,8 @@ public class AccessLogService {
                 .flatMapMany(shls -> {
                     Map<String, String> labelMap = new HashMap<>();
                     shls.forEach(shl -> labelMap.put(shl.getId(), shl.getLabel()));
-                    return accessLogRepository.findByPatientIdOrderByAccessedAtDesc(patientId)
-                            .map(log -> toEntry(log, labelMap));
+                    return accessLogRepository.findByPatientId(patientId)
+                            .map(item -> toEntry(item, labelMap));
                 });
     }
 
@@ -59,19 +63,19 @@ public class AccessLogService {
                 .flatMapMany(shl -> {
                     Map<String, String> labelMap = new HashMap<>();
                     labelMap.put(shl.getId(), shl.getLabel());
-                    return accessLogRepository.findByShlIdOrderByAccessedAtDesc(shlId)
-                            .map(log -> toEntry(log, labelMap));
+                    return accessLogRepository.findByShlId(shlId)
+                            .map(item -> toEntry(item, labelMap));
                 });
     }
 
-    private AccessLogEntry toEntry(AccessLogDocument log, Map<String, String> labelMap) {
+    private AccessLogEntry toEntry(AccessLogItem item, Map<String, String> labelMap) {
         return new AccessLogEntry(
-                log.getId(),
-                log.getShlId(),
-                labelMap.getOrDefault(log.getShlId(), null),
-                log.getRecipient(),
-                log.getAccessType(),
-                log.getAccessedAt()
+                item.id(),
+                item.shlId(),
+                labelMap.getOrDefault(item.shlId(), null),
+                item.recipient(),
+                item.accessType(),
+                item.accessedAt()
         );
     }
 }

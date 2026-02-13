@@ -2,7 +2,6 @@ package com.chanakya.shl2.controller;
 
 import com.chanakya.shl2.model.dto.request.ManifestRequest;
 import com.chanakya.shl2.model.dto.response.ManifestResponse;
-import com.chanakya.shl2.service.FileAccessService;
 import com.chanakya.shl2.service.ManifestService;
 import jakarta.validation.Valid;
 import org.springframework.http.MediaType;
@@ -16,11 +15,9 @@ import reactor.core.publisher.Mono;
 public class ShlProtocolController {
 
     private final ManifestService manifestService;
-    private final FileAccessService fileAccessService;
 
-    public ShlProtocolController(ManifestService manifestService, FileAccessService fileAccessService) {
+    public ShlProtocolController(ManifestService manifestService) {
         this.manifestService = manifestService;
-        this.fileAccessService = fileAccessService;
     }
 
     /**
@@ -35,19 +32,6 @@ public class ShlProtocolController {
     }
 
     /**
-     * File download via signed token.
-     * GET /api/shl/file/{signedToken}
-     */
-    @GetMapping("/file/{signedToken}")
-    public Mono<ResponseEntity<String>> getFile(@PathVariable String signedToken) {
-        return fileAccessService.resolveSignedToken(signedToken)
-                .map(file -> ResponseEntity.ok()
-                        .contentType(MediaType.parseMediaType("application/jose"))
-                        .body(file.getEncryptedContent()))
-                .defaultIfEmpty(ResponseEntity.notFound().build());
-    }
-
-    /**
      * Direct file access for U-flag SHLs.
      * GET /api/shl/direct/{manifestId}?recipient=...
      * Per SHL spec, recipient query parameter is required.
@@ -57,9 +41,9 @@ public class ShlProtocolController {
             @PathVariable String manifestId,
             @RequestParam String recipient) {
         return manifestService.handleDirectFileRequest(manifestId, recipient)
-                .map(file -> ResponseEntity.ok()
+                .map(content -> ResponseEntity.ok()
                         .contentType(MediaType.parseMediaType("application/jose"))
-                        .body(file.getEncryptedContent()))
+                        .body(content))
                 .defaultIfEmpty(ResponseEntity.notFound().build());
     }
 }

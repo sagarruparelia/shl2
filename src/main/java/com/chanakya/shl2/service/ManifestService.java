@@ -17,7 +17,6 @@ import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
 import java.time.Instant;
-import java.util.List;
 
 @Service
 public class ManifestService {
@@ -26,6 +25,7 @@ public class ManifestService {
     private final ShlFileRepository fileRepository;
     private final PasscodeService passcodeService;
     private final FileAccessService fileAccessService;
+    private final S3StorageService s3StorageService;
     private final MemberService memberService;
     private final AccessLogService accessLogService;
 
@@ -33,12 +33,14 @@ public class ManifestService {
                            ShlFileRepository fileRepository,
                            PasscodeService passcodeService,
                            FileAccessService fileAccessService,
+                           S3StorageService s3StorageService,
                            MemberService memberService,
                            AccessLogService accessLogService) {
         this.shlRepository = shlRepository;
         this.fileRepository = fileRepository;
         this.passcodeService = passcodeService;
         this.fileAccessService = fileAccessService;
+        this.s3StorageService = s3StorageService;
         this.memberService = memberService;
         this.accessLogService = accessLogService;
     }
@@ -60,8 +62,9 @@ public class ManifestService {
 
     /**
      * Handles direct file request for U-flag SHLs (GET /api/shl/direct/{manifestId}).
+     * Returns the encrypted content downloaded from S3.
      */
-    public Mono<ShlFileDocument> handleDirectFileRequest(String manifestId, String recipient) {
+    public Mono<String> handleDirectFileRequest(String manifestId, String recipient) {
         return shlRepository.findByManifestId(manifestId)
                 .switchIfEmpty(Mono.error(new ShlNotFoundException("SHL not found")))
                 .flatMap(this::checkSharingEnabled)
@@ -69,7 +72,7 @@ public class ManifestService {
                 .flatMap(shl -> fileRepository.findByShlId(shl.getId()).next()
                         .flatMap(file -> accessLogService
                                 .logAccess(shl, recipient, AccessType.DIRECT_FILE)
-                                .thenReturn(file)));
+                                .then(s3StorageService.download(file.getS3Key()))));
     }
 
     private Mono<ShlDocument> checkSharingEnabled(ShlDocument shl) {
@@ -93,37 +96,37 @@ public class ManifestService {
 
     private Mono<ManifestResponse> buildManifestResponse(ShlDocument shl, ManifestRequest request) {
         return fileRepository.findByShlId(shl.getId())
-                .map(file -> toFileEntry(file, request.embeddedLengthMax()))
+                .flatMap(file -> toFileEntry(file, request.embeddedLengthMax()))
                 .collectList()
                 .map(files -> {
-                    // Per SHL spec: "can-change" for L-flag, "finalized" otherwise
                     String status = shl.getFlags().contains(ShlFlag.L) ? "can-change" : "finalized";
                     return new ManifestResponse(status, files);
                 });
     }
 
-    private ManifestFileEntry toFileEntry(ShlFileDocument file, Integer embeddedLengthMax) {
+    private Mono<ManifestFileEntry> toFileEntry(ShlFileDocument file, Integer embeddedLengthMax) {
         String lastUpdated = file.getLastUpdated() != null
                 ? file.getLastUpdated().toString() : null;
 
-        // If embeddedLengthMax is set and content fits, embed it
+        // If embeddedLengthMax is set and content fits, download from S3 and embed
         if (embeddedLengthMax != null && embeddedLengthMax > 0
-                && file.getEncryptedContent().length() <= embeddedLengthMax) {
-            return new ManifestFileEntry(
-                    file.getContentType(),
-                    null,
-                    file.getEncryptedContent(),
-                    lastUpdated
-            );
+                && file.getContentLength() <= embeddedLengthMax) {
+            return s3StorageService.download(file.getS3Key())
+                    .map(content -> new ManifestFileEntry(
+                            file.getContentType(),
+                            null,
+                            content,
+                            lastUpdated
+                    ));
         }
 
-        // Otherwise, provide a signed location URL
-        String location = fileAccessService.generateSignedUrl(file.getId());
-        return new ManifestFileEntry(
+        // Otherwise, provide an S3 presigned URL
+        String location = fileAccessService.generatePresignedUrl(file);
+        return Mono.just(new ManifestFileEntry(
                 file.getContentType(),
                 location,
                 null,
                 lastUpdated
-        );
+        ));
     }
 }
