@@ -1,0 +1,239 @@
+package com.chanakya.shl2.service;
+
+import com.chanakya.shl2.config.ShlProperties;
+import com.chanakya.shl2.crypto.JweService;
+import com.chanakya.shl2.crypto.KeyGenerationService;
+import com.chanakya.shl2.crypto.ShlPayloadEncoder;
+import com.chanakya.shl2.exception.ShlNotFoundException;
+import com.chanakya.shl2.model.document.ShlDocument;
+import com.chanakya.shl2.model.document.ShlFileDocument;
+import com.chanakya.shl2.model.dto.request.CreateShlRequest;
+import com.chanakya.shl2.model.dto.response.CreateShlResponse;
+import com.chanakya.shl2.model.dto.response.ShlStatusResponse;
+import com.chanakya.shl2.model.enums.ShlFlag;
+import com.chanakya.shl2.model.enums.ShlStatus;
+import com.chanakya.shl2.repository.ShlFileRepository;
+import com.chanakya.shl2.repository.ShlRepository;
+import com.chanakya.shl2.util.EntropyUtil;
+import org.springframework.stereotype.Service;
+import reactor.core.publisher.Mono;
+
+import java.time.Instant;
+import java.util.HashSet;
+import java.util.Set;
+
+@Service
+public class ShlCreationService {
+
+    private final ShlRepository shlRepository;
+    private final ShlFileRepository fileRepository;
+    private final KeyGenerationService keyGenerationService;
+    private final JweService jweService;
+    private final ShlPayloadEncoder payloadEncoder;
+    private final PasscodeService passcodeService;
+    private final HealthLakeService healthLakeService;
+    private final SmartHealthCardService shcService;
+    private final QrCodeService qrCodeService;
+    private final ShlProperties properties;
+
+    public ShlCreationService(ShlRepository shlRepository,
+                              ShlFileRepository fileRepository,
+                              KeyGenerationService keyGenerationService,
+                              JweService jweService,
+                              ShlPayloadEncoder payloadEncoder,
+                              PasscodeService passcodeService,
+                              HealthLakeService healthLakeService,
+                              SmartHealthCardService shcService,
+                              QrCodeService qrCodeService,
+                              ShlProperties properties) {
+        this.shlRepository = shlRepository;
+        this.fileRepository = fileRepository;
+        this.keyGenerationService = keyGenerationService;
+        this.jweService = jweService;
+        this.payloadEncoder = payloadEncoder;
+        this.passcodeService = passcodeService;
+        this.healthLakeService = healthLakeService;
+        this.shcService = shcService;
+        this.qrCodeService = qrCodeService;
+        this.properties = properties;
+    }
+
+    /**
+     * Creates a new SHL end-to-end.
+     */
+    public Mono<CreateShlResponse> createShl(CreateShlRequest request) {
+        String encryptionKey = keyGenerationService.generateAes256Key();
+        String manifestId = EntropyUtil.generateManifestId();
+        String managementToken = EntropyUtil.generateManagementToken();
+
+        // Build flags
+        Set<ShlFlag> flags = new HashSet<>();
+        if (request.flags() != null) {
+            flags.addAll(request.flags());
+        }
+        if (request.passcode() != null && !request.passcode().isBlank()) {
+            flags.add(ShlFlag.P);
+        }
+
+        // Build SHL document
+        Instant now = Instant.now();
+        ShlDocument shl = ShlDocument.builder()
+                .manifestId(manifestId)
+                .managementToken(managementToken)
+                .encryptionKeyBase64(encryptionKey)
+                .label(request.label())
+                .expirationTime(request.timeframeEnd())
+                .flags(flags)
+                .status(ShlStatus.ACTIVE)
+                .passcodeHash(request.passcode() != null && !request.passcode().isBlank()
+                        ? passcodeService.hashPasscode(request.passcode()) : null)
+                .passcodeFailuresRemaining(request.passcode() != null && !request.passcode().isBlank()
+                        ? properties.defaultPasscodeAttempts() : null)
+                .patientId(request.patientId())
+                .categories(request.categories())
+                .timeframeStart(request.timeframeStart())
+                .timeframeEnd(request.timeframeEnd())
+                .includeHealthCards(request.includeHealthCards())
+                .createdAt(now)
+                .updatedAt(now)
+                .build();
+
+        return shlRepository.save(shl)
+                .flatMap(savedShl -> fetchAndEncryptData(savedShl)
+                        .then(Mono.just(savedShl)))
+                .flatMap(savedShl -> {
+                    String shlUri = payloadEncoder.encode(savedShl);
+
+                    if (request.generateQrCode()) {
+                        return qrCodeService.generateQrCodeDataUri(shlUri, 400)
+                                .map(qrDataUri -> new CreateShlResponse(
+                                        shlUri,
+                                        savedShl.getManagementToken(),
+                                        qrDataUri,
+                                        savedShl.getExpirationTime(),
+                                        savedShl.getLabel()
+                                ));
+                    }
+
+                    return Mono.just(new CreateShlResponse(
+                            shlUri,
+                            savedShl.getManagementToken(),
+                            null,
+                            savedShl.getExpirationTime(),
+                            savedShl.getLabel()
+                    ));
+                });
+    }
+
+    /**
+     * Gets the status of an SHL by management token.
+     */
+    public Mono<ShlStatusResponse> getStatus(String managementToken) {
+        return shlRepository.findByManagementToken(managementToken)
+                .switchIfEmpty(Mono.error(new ShlNotFoundException("SHL not found")))
+                .flatMap(shl -> fileRepository.findByShlId(shl.getId())
+                        .count()
+                        .map(count -> new ShlStatusResponse(
+                                shl.getManifestId(),
+                                shl.getLabel(),
+                                shl.getStatus(),
+                                shl.getFlags(),
+                                shl.getExpirationTime(),
+                                count,
+                                shl.getCreatedAt()
+                        )));
+    }
+
+    /**
+     * Revokes an SHL by management token.
+     */
+    public Mono<Void> revokeShl(String managementToken) {
+        return shlRepository.findByManagementToken(managementToken)
+                .switchIfEmpty(Mono.error(new ShlNotFoundException("SHL not found")))
+                .flatMap(shl -> {
+                    shl.setStatus(ShlStatus.REVOKED);
+                    shl.setUpdatedAt(Instant.now());
+                    return shlRepository.save(shl);
+                })
+                .then();
+    }
+
+    /**
+     * Refreshes SHL data for L-flag links by re-fetching from HealthLake.
+     */
+    public Mono<Void> refreshShlData(String managementToken) {
+        return shlRepository.findByManagementToken(managementToken)
+                .switchIfEmpty(Mono.error(new ShlNotFoundException("SHL not found")))
+                .flatMap(shl -> {
+                    if (!shl.getFlags().contains(ShlFlag.L)) {
+                        return Mono.error(new IllegalStateException("Only long-term SHLs can be refreshed"));
+                    }
+                    return fileRepository.deleteByShlId(shl.getId())
+                            .then(fetchAndEncryptData(shl))
+                            .then(Mono.defer(() -> {
+                                shl.setUpdatedAt(Instant.now());
+                                return shlRepository.save(shl);
+                            }))
+                            .then();
+                });
+    }
+
+    /**
+     * Generates a QR code for an existing SHL.
+     */
+    public Mono<byte[]> generateQrCode(String managementToken) {
+        return shlRepository.findByManagementToken(managementToken)
+                .switchIfEmpty(Mono.error(new ShlNotFoundException("SHL not found")))
+                .flatMap(shl -> {
+                    String shlUri = payloadEncoder.encode(shl);
+                    return qrCodeService.generateQrCode(shlUri, 400);
+                });
+    }
+
+    private Mono<Void> fetchAndEncryptData(ShlDocument shl) {
+        return healthLakeService.fetchResourcesByCategory(
+                        shl.getPatientId(),
+                        shl.getCategories(),
+                        shl.getTimeframeStart(),
+                        shl.getTimeframeEnd()
+                )
+                .flatMap(wrapper -> {
+                    // Encrypt the FHIR bundle
+                    String encrypted = jweService.encrypt(wrapper.getBundleJson(), shl.getEncryptionKeyBase64());
+                    ShlFileDocument fileDoc = ShlFileDocument.builder()
+                            .shlId(shl.getId())
+                            .contentType("application/fhir+json")
+                            .encryptedContent(encrypted)
+                            .lastUpdated(Instant.now())
+                            .createdAt(Instant.now())
+                            .build();
+                    return fileRepository.save(fileDoc);
+                })
+                .then(shl.isIncludeHealthCards()
+                        ? createHealthCards(shl)
+                        : Mono.empty())
+                .then();
+    }
+
+    private Mono<Void> createHealthCards(ShlDocument shl) {
+        return healthLakeService.fetchResourcesByCategory(
+                        shl.getPatientId(),
+                        shl.getCategories(),
+                        shl.getTimeframeStart(),
+                        shl.getTimeframeEnd()
+                )
+                .flatMap(wrapper -> shcService.createHealthCard(wrapper.getBundleJson())
+                        .flatMap(shcJson -> {
+                            String encrypted = jweService.encrypt(shcJson, shl.getEncryptionKeyBase64());
+                            ShlFileDocument fileDoc = ShlFileDocument.builder()
+                                    .shlId(shl.getId())
+                                    .contentType("application/smart-health-card")
+                                    .encryptedContent(encrypted)
+                                    .lastUpdated(Instant.now())
+                                    .createdAt(Instant.now())
+                                    .build();
+                            return fileRepository.save(fileDoc);
+                        }))
+                .then();
+    }
+}

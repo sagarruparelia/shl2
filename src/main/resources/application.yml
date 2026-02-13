@@ -1,0 +1,19 @@
+spring:
+  application:
+    name: shl2
+  data:
+    mongodb:
+      uri: ${MONGODB_URI:mongodb://localhost:27017/shl2}
+      auto-index-creation: true
+
+shl:
+  base-url: ${SHL_BASE_URL:http://localhost:8080}
+  file-url-expiry-seconds: 3600
+  signing-secret: ${SHL_SIGNING_SECRET:change-in-prod-min-32-chars!!!!}
+  default-passcode-attempts: 5
+  shc:
+    issuer-url: ${SHC_ISSUER_URL:https://shl.example.com}
+    signing-key-path: ${SHC_SIGNING_KEY_PATH:classpath:keys/shc-signing.jwk}
+  aws:
+    region: ${AWS_REGION:us-east-1}
+    healthlake-datastore-id: ${AWS_HEALTHLAKE_DATASTORE_ID:}

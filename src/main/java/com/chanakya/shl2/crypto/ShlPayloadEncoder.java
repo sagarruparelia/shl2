@@ -1,0 +1,66 @@
+package com.chanakya.shl2.crypto;
+
+import com.chanakya.shl2.config.ShlProperties;
+import com.chanakya.shl2.model.document.ShlDocument;
+import com.chanakya.shl2.model.enums.ShlFlag;
+import com.chanakya.shl2.util.Base64UrlUtil;
+import tools.jackson.databind.ObjectMapper;
+import org.springframework.stereotype.Service;
+
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+@Service
+public class ShlPayloadEncoder {
+
+    private final ShlProperties properties;
+    private final ObjectMapper objectMapper;
+
+    public ShlPayloadEncoder(ShlProperties properties, ObjectMapper objectMapper) {
+        this.properties = properties;
+        this.objectMapper = objectMapper;
+    }
+
+    /**
+     * Builds and encodes the SHL URI: shlink:/{base64url-encoded-payload}
+     */
+    public String encode(ShlDocument shl) {
+        try {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("url", buildManifestUrl(shl.getManifestId()));
+            payload.put("key", shl.getEncryptionKeyBase64());
+
+            if (shl.getExpirationTime() != null) {
+                payload.put("exp", shl.getExpirationTime().getEpochSecond());
+            }
+
+            Set<ShlFlag> flags = shl.getFlags();
+            if (flags != null && !flags.isEmpty()) {
+                String flagStr = flags.stream()
+                        .map(ShlFlag::name)
+                        .sorted()
+                        .collect(Collectors.joining());
+                payload.put("flag", flagStr);
+            }
+
+            if (shl.getLabel() != null && !shl.getLabel().isBlank()) {
+                payload.put("label", shl.getLabel());
+            }
+
+            payload.put("v", 1);
+
+            String json = objectMapper.writeValueAsString(payload);
+            String encoded = Base64UrlUtil.encode(json.getBytes(StandardCharsets.UTF_8));
+            return "shlink:/" + encoded;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to encode SHL payload", e);
+        }
+    }
+
+    private String buildManifestUrl(String manifestId) {
+        return properties.baseUrl() + "/api/shl/manifest/" + manifestId;
+    }
+}

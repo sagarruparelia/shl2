@@ -34,3 +34,5 @@ build/
 
 .claude
 .mvn
+mvnw
+mvnw.cmd
