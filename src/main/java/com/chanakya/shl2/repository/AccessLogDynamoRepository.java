@@ -11,6 +11,7 @@ import software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 
+import java.util.HashMap;
 import java.util.Map;
 
 @Repository
@@ -46,6 +47,27 @@ public class AccessLogDynamoRepository {
         return Flux.from(dynamoClient.queryPaginator(request))
                 .flatMapIterable(response -> response.items())
                 .map(AccessLogItem::fromItem);
+    }
+
+    public Mono<software.amazon.awssdk.services.dynamodb.model.QueryResponse> findByPatientIdPaginated(
+            String patientId, int limit, String cursor) {
+        QueryRequest.Builder builder = QueryRequest.builder()
+                .tableName(tableName)
+                .keyConditionExpression("patientId = :pid")
+                .expressionAttributeValues(Map.of(
+                        ":pid", AttributeValue.fromS(patientId)
+                ))
+                .scanIndexForward(false)
+                .limit(limit);
+
+        if (cursor != null && !cursor.isBlank()) {
+            Map<String, AttributeValue> exclusiveStartKey = new HashMap<>();
+            exclusiveStartKey.put("patientId", AttributeValue.fromS(patientId));
+            exclusiveStartKey.put("sortKey", AttributeValue.fromS(cursor));
+            builder.exclusiveStartKey(exclusiveStartKey);
+        }
+
+        return Mono.fromFuture(dynamoClient.query(builder.build()));
     }
 
     public Mono<Void> deleteByPatientId(String patientId) {

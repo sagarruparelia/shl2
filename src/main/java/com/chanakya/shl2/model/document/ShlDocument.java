@@ -40,6 +40,7 @@ public class ShlDocument {
 
     private String passcodeHash;
     private Integer passcodeFailuresRemaining;
+    private Instant passcodeLockedUntil;
 
     @Indexed
     private String patientId;

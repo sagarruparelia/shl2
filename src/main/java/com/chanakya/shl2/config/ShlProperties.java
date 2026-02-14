@@ -7,6 +7,7 @@ public record ShlProperties(
         String baseUrl,
         int fileUrlExpirySeconds,
         int defaultPasscodeAttempts,
+        int passcodeLockoutDurationMinutes,
         Shc shc,
         Aws aws
 ) {

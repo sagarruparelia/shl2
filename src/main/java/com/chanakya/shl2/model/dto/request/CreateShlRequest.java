@@ -15,6 +15,7 @@ public record CreateShlRequest(
         @NotEmpty List<FhirCategory> categories,
         Instant timeframeStart,
         Instant timeframeEnd,
+        Instant expirationTime,
         @Size(max = 80) String label,
         @Size(min = 4, max = 20) String passcode,
         Set<ShlFlag> flags,

@@ -4,24 +4,33 @@ import com.chanakya.shl2.exception.ShlNotFoundException;
 import com.chanakya.shl2.model.document.ShlDocument;
 import com.chanakya.shl2.model.dynamodb.AccessLogItem;
 import com.chanakya.shl2.model.dto.response.AccessLogEntry;
+import com.chanakya.shl2.model.dto.response.PaginatedAccessLog;
 import com.chanakya.shl2.model.enums.AccessType;
 import com.chanakya.shl2.repository.AccessLogDynamoRepository;
 import com.chanakya.shl2.repository.ShlRepository;
+import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.util.retry.Retry;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 @Service
 public class AccessLogService {
 
     private static final Logger log = LoggerFactory.getLogger(AccessLogService.class);
+
+    private static final Set<AccessType> DATA_ACCESS_EVENTS = Set.of(
+            AccessType.MANIFEST, AccessType.DIRECT_FILE
+    );
 
     private final AccessLogDynamoRepository accessLogRepository;
     private final ShlRepository shlRepository;
@@ -45,10 +54,14 @@ public class AccessLogService {
                 now
         );
 
-        return accessLogRepository.save(item)
+        Mono<Void> save = accessLogRepository.save(item)
                 .doOnError(e -> log.error("event=access_log_write_failed shlId={} accessType={} error={}",
-                        shl.getId(), accessType, e.getMessage()))
-                .onErrorResume(e -> Mono.empty());
+                        shl.getId(), accessType, e.getMessage()));
+
+        if (DATA_ACCESS_EVENTS.contains(accessType)) {
+            return save.retryWhen(Retry.backoff(2, Duration.ofMillis(100)));
+        }
+        return save.onErrorResume(e -> Mono.empty());
     }
 
     public Mono<Void> logAccess(String patientId, String recipient, AccessType accessType) {
@@ -65,20 +78,32 @@ public class AccessLogService {
                 now
         );
 
-        return accessLogRepository.save(item)
+        Mono<Void> save = accessLogRepository.save(item)
                 .doOnError(e -> log.error("event=access_log_write_failed patientId={} accessType={} error={}",
-                        patientId, accessType, e.getMessage()))
-                .onErrorResume(e -> Mono.empty());
+                        patientId, accessType, e.getMessage()));
+
+        if (DATA_ACCESS_EVENTS.contains(accessType)) {
+            return save.retryWhen(Retry.backoff(2, Duration.ofMillis(100)));
+        }
+        return save.onErrorResume(e -> Mono.empty());
     }
 
-    public Flux<AccessLogEntry> getAccessLogForMember(String patientId) {
+    public Mono<PaginatedAccessLog> getAccessLogForMember(String patientId, int limit, String cursor) {
         return shlRepository.findByPatientId(patientId)
                 .collectList()
-                .flatMapMany(shls -> {
+                .flatMap(shls -> {
                     Map<String, String> labelMap = new HashMap<>();
                     shls.forEach(shl -> labelMap.put(shl.getId(), shl.getLabel()));
-                    return accessLogRepository.findByPatientId(patientId)
-                            .map(item -> toEntry(item, labelMap));
+                    return accessLogRepository.findByPatientIdPaginated(patientId, limit, cursor)
+                            .map(response -> {
+                                java.util.List<AccessLogEntry> entries = response.items().stream()
+                                        .map(item -> toEntry(AccessLogItem.fromItem(item), labelMap))
+                                        .toList();
+                                String nextCursor = response.hasLastEvaluatedKey()
+                                        ? response.lastEvaluatedKey().get("sortKey").s()
+                                        : null;
+                                return new PaginatedAccessLog(entries, nextCursor);
+                            });
                 });
     }
 

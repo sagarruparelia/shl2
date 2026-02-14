@@ -82,16 +82,16 @@ public class HealthLakeService {
         String path = "/" + category.getFhirResourceType() + "?" + searchParams;
 
         return fetchBundleWithPagination(path)
-                .map(bundleJson -> {
+                .flatMap(bundleJson -> {
                     int count = countResources(bundleJson);
-                    if (category == FhirCategory.CLINICAL_DOCUMENTS) {
-                        bundleJson = resolveDocumentReferenceBinaries(bundleJson);
-                    }
-                    return FhirBundleWrapper.builder()
+                    Mono<String> resolvedBundle = (category == FhirCategory.CLINICAL_DOCUMENTS)
+                            ? resolveDocumentReferenceBinaries(bundleJson)
+                            : Mono.just(bundleJson);
+                    return resolvedBundle.map(resolved -> FhirBundleWrapper.builder()
                             .category(category)
-                            .bundleJson(bundleJson)
+                            .bundleJson(resolved)
                             .resourceCount(count)
-                            .build();
+                            .build());
                 })
                 .onErrorMap(e -> !(e instanceof HealthLakeException),
                         e -> new HealthLakeException(
@@ -180,60 +180,77 @@ public class HealthLakeService {
      * Resolves Binary references in DocumentReference resources.
      * For each content[].attachment with a relative Binary URL, fetches and embeds the data.
      */
-    private String resolveDocumentReferenceBinaries(String bundleJson) {
+    private Mono<String> resolveDocumentReferenceBinaries(String bundleJson) {
+        ObjectNode bundle;
         try {
-            ObjectNode bundle = (ObjectNode) objectMapper.readTree(bundleJson);
-            JsonNode entries = bundle.path("entry");
-
-            if (!entries.isArray()) {
-                return bundleJson;
-            }
-
-            for (JsonNode entry : entries) {
-                JsonNode resource = entry.path("resource");
-                if (!"DocumentReference".equals(resource.path("resourceType").asText())) {
-                    continue;
-                }
-
-                JsonNode contentArray = resource.path("content");
-                if (!contentArray.isArray()) {
-                    continue;
-                }
-
-                for (JsonNode content : contentArray) {
-                    ObjectNode attachment = (ObjectNode) content.path("attachment");
-                    if (attachment.isMissingNode()) {
-                        continue;
-                    }
-
-                    String url = attachment.path("url").asText(null);
-                    if (url != null && url.matches("Binary/[\\w-]+")) {
-                        // Fetch the Binary resource
-                        try {
-                            String binaryJson = fetchResource("/" + url).block();
-                            if (binaryJson != null) {
-                                JsonNode binary = objectMapper.readTree(binaryJson);
-                                String data = binary.path("data").asText(null);
-                                String contentType = binary.path("contentType").asText(null);
-                                if (data != null) {
-                                    attachment.put("data", data);
-                                }
-                                if (contentType != null) {
-                                    attachment.put("contentType", contentType);
-                                }
-                                attachment.remove("url");
-                            }
-                        } catch (Exception e) {
-                            // Keep the reference as-is if binary fetch fails
-                        }
-                    }
-                }
-            }
-
-            return objectMapper.writeValueAsString(bundle);
+            bundle = (ObjectNode) objectMapper.readTree(bundleJson);
         } catch (Exception e) {
-            return bundleJson; // Return original if parsing fails
+            return Mono.just(bundleJson);
         }
+
+        JsonNode entries = bundle.path("entry");
+        if (!entries.isArray()) {
+            return Mono.just(bundleJson);
+        }
+
+        // Collect all Binary fetch tasks
+        java.util.List<Mono<Void>> fetchTasks = new java.util.ArrayList<>();
+
+        for (JsonNode entry : entries) {
+            JsonNode resource = entry.path("resource");
+            if (!"DocumentReference".equals(resource.path("resourceType").asText())) {
+                continue;
+            }
+
+            JsonNode contentArray = resource.path("content");
+            if (!contentArray.isArray()) {
+                continue;
+            }
+
+            for (JsonNode content : contentArray) {
+                ObjectNode attachment = (ObjectNode) content.path("attachment");
+                if (attachment.isMissingNode()) {
+                    continue;
+                }
+
+                String url = attachment.path("url").asText(null);
+                if (url != null && url.matches("Binary/[\\w-]+")) {
+                    Mono<Void> fetchTask = fetchResource("/" + url)
+                            .flatMap(binaryJson -> {
+                                try {
+                                    JsonNode binary = objectMapper.readTree(binaryJson);
+                                    String data = binary.path("data").asText(null);
+                                    String binaryContentType = binary.path("contentType").asText(null);
+                                    if (data != null) {
+                                        attachment.put("data", data);
+                                    }
+                                    if (binaryContentType != null) {
+                                        attachment.put("contentType", binaryContentType);
+                                    }
+                                    attachment.remove("url");
+                                } catch (Exception e) {
+                                    // Keep the reference as-is if parsing fails
+                                }
+                                return Mono.<Void>empty();
+                            })
+                            .onErrorResume(e -> Mono.empty());
+                    fetchTasks.add(fetchTask);
+                }
+            }
+        }
+
+        if (fetchTasks.isEmpty()) {
+            return Mono.just(bundleJson);
+        }
+
+        return Flux.merge(fetchTasks)
+                .then(Mono.fromCallable(() -> {
+                    try {
+                        return objectMapper.writeValueAsString(bundle);
+                    } catch (Exception e) {
+                        return bundleJson;
+                    }
+                }));
     }
 
     private int countResources(String bundleJson) {

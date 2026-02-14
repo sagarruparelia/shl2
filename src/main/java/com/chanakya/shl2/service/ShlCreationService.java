@@ -17,7 +17,10 @@ import com.chanakya.shl2.repository.ShlFileRepository;
 import com.chanakya.shl2.repository.ShlRepository;
 import com.chanakya.shl2.util.EntropyUtil;
 import org.springframework.stereotype.Service;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+
+import tools.jackson.databind.ObjectMapper;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -39,7 +42,9 @@ public class ShlCreationService {
     private final QrCodeService qrCodeService;
     private final S3StorageService s3StorageService;
     private final AccessLogService accessLogService;
+    private final MemberService memberService;
     private final ShlProperties properties;
+    private final ObjectMapper objectMapper;
 
     public ShlCreationService(ShlRepository shlRepository,
                               ShlFileRepository fileRepository,
@@ -52,7 +57,9 @@ public class ShlCreationService {
                               QrCodeService qrCodeService,
                               S3StorageService s3StorageService,
                               AccessLogService accessLogService,
-                              ShlProperties properties) {
+                              MemberService memberService,
+                              ShlProperties properties,
+                              ObjectMapper objectMapper) {
         this.shlRepository = shlRepository;
         this.fileRepository = fileRepository;
         this.keyGenerationService = keyGenerationService;
@@ -64,13 +71,26 @@ public class ShlCreationService {
         this.qrCodeService = qrCodeService;
         this.s3StorageService = s3StorageService;
         this.accessLogService = accessLogService;
+        this.memberService = memberService;
         this.properties = properties;
+        this.objectMapper = objectMapper;
     }
 
     /**
      * Creates a new SHL end-to-end.
      */
     public Mono<CreateShlResponse> createShl(CreateShlRequest request) {
+        // Validate timeframe
+        if (request.timeframeStart() != null && request.timeframeEnd() != null
+                && !request.timeframeStart().isBefore(request.timeframeEnd())) {
+            return Mono.error(new IllegalArgumentException("timeframeStart must be before timeframeEnd"));
+        }
+
+        // Validate expiration time is in the future
+        if (request.expirationTime() != null && !request.expirationTime().isAfter(Instant.now())) {
+            return Mono.error(new IllegalArgumentException("expirationTime must be in the future"));
+        }
+
         String encryptionKey = keyGenerationService.generateAes256Key();
         String manifestId = EntropyUtil.generateManifestId();
         String managementToken = EntropyUtil.generateManagementToken();
@@ -96,7 +116,7 @@ public class ShlCreationService {
                 .managementToken(managementToken)
                 .encryptionKeyBase64(encryptionKey)
                 .label(request.label())
-                .expirationTime(request.timeframeEnd())
+                .expirationTime(request.expirationTime())
                 .flags(flags)
                 .status(ShlStatus.ACTIVE)
                 .passcodeHash(request.passcode() != null && !request.passcode().isBlank()
@@ -112,7 +132,8 @@ public class ShlCreationService {
                 .updatedAt(now)
                 .build();
 
-        return shlRepository.save(shl)
+        return memberService.ensureSharingEnabled(request.patientId())
+                .then(shlRepository.save(shl))
                 .flatMap(savedShl -> accessLogService.logAccess(savedShl, null, AccessType.CREATED)
                         .then(fetchAndEncryptData(savedShl))
                         .thenReturn(savedShl))
@@ -209,17 +230,19 @@ public class ShlCreationService {
     private Mono<Void> fetchAndEncryptData(ShlDocument shl) {
         String fhirContentType = "application/fhir+json;fhirVersion=4.0.1";
 
-        if (shl.getFlags().contains(ShlFlag.U)) {
-            // U-flag: spec requires single encrypted file — merge all bundles into one
-            return healthLakeService.fetchResourcesByCategory(
-                            shl.getPatientId(),
-                            shl.getCategories(),
-                            shl.getTimeframeStart(),
-                            shl.getTimeframeEnd()
-                    )
-                    .map(wrapper -> wrapper.getBundleJson())
-                    .collectList()
-                    .flatMap(bundles -> {
+        return healthLakeService.fetchResourcesByCategory(
+                        shl.getPatientId(),
+                        shl.getCategories(),
+                        shl.getTimeframeStart(),
+                        shl.getTimeframeEnd()
+                )
+                .collectList()
+                .flatMap(wrappers -> {
+                    if (shl.getFlags().contains(ShlFlag.U)) {
+                        // U-flag: spec requires single encrypted file — merge all bundles into one
+                        java.util.List<String> bundles = wrappers.stream()
+                                .map(w -> w.getBundleJson())
+                                .toList();
                         String merged = mergeFhirBundles(bundles);
                         String encrypted = jweService.encrypt(merged, shl.getEncryptionKeyBase64(), fhirContentType);
                         String s3Key = "shl-files/" + shl.getId() + "/" + UUID.randomUUID();
@@ -234,37 +257,41 @@ public class ShlCreationService {
                                             .createdAt(Instant.now())
                                             .build();
                                     return fileRepository.save(fileDoc);
-                                });
-                    })
-                    .then();
-        }
+                                })
+                                .then();
+                    }
 
-        return healthLakeService.fetchResourcesByCategory(
-                        shl.getPatientId(),
-                        shl.getCategories(),
-                        shl.getTimeframeStart(),
-                        shl.getTimeframeEnd()
-                )
-                .flatMap(wrapper -> {
-                    String encrypted = jweService.encrypt(wrapper.getBundleJson(), shl.getEncryptionKeyBase64(), fhirContentType);
-                    String s3Key = "shl-files/" + shl.getId() + "/" + UUID.randomUUID();
-                    return s3StorageService.upload(s3Key, encrypted, shl.getExpirationTime())
-                            .flatMap(key -> {
-                                ShlFileDocument fileDoc = ShlFileDocument.builder()
-                                        .shlId(shl.getId())
-                                        .contentType(fhirContentType)
-                                        .s3Key(key)
-                                        .contentLength(encrypted.getBytes(StandardCharsets.UTF_8).length)
-                                        .lastUpdated(Instant.now())
-                                        .createdAt(Instant.now())
-                                        .build();
-                                return fileRepository.save(fileDoc);
-                            });
-                })
-                .then(shl.isIncludeHealthCards()
-                        ? createHealthCards(shl)
-                        : Mono.empty())
-                .then();
+                    // Non-U-flag: store each bundle as a separate encrypted file
+                    Mono<Void> fhirFiles = Flux.fromIterable(wrappers)
+                            .flatMap(wrapper -> {
+                                String encrypted = jweService.encrypt(wrapper.getBundleJson(), shl.getEncryptionKeyBase64(), fhirContentType);
+                                String s3Key = "shl-files/" + shl.getId() + "/" + UUID.randomUUID();
+                                return s3StorageService.upload(s3Key, encrypted, shl.getExpirationTime())
+                                        .flatMap(key -> {
+                                            ShlFileDocument fileDoc = ShlFileDocument.builder()
+                                                    .shlId(shl.getId())
+                                                    .contentType(fhirContentType)
+                                                    .s3Key(key)
+                                                    .contentLength(encrypted.getBytes(StandardCharsets.UTF_8).length)
+                                                    .lastUpdated(Instant.now())
+                                                    .createdAt(Instant.now())
+                                                    .build();
+                                            return fileRepository.save(fileDoc);
+                                        });
+                            })
+                            .then();
+
+                    if (!shl.isIncludeHealthCards()) {
+                        return fhirFiles;
+                    }
+
+                    // Create health cards from the already-fetched wrappers
+                    Mono<Void> healthCards = Flux.fromIterable(wrappers)
+                            .flatMap(wrapper -> createHealthCardFromBundle(shl, wrapper.getBundleJson()))
+                            .then();
+
+                    return fhirFiles.then(healthCards);
+                });
     }
 
     /**
@@ -275,7 +302,6 @@ public class ShlCreationService {
             return bundles.getFirst();
         }
         try {
-            var objectMapper = new tools.jackson.databind.ObjectMapper();
             var merged = (tools.jackson.databind.node.ObjectNode) objectMapper.readTree(bundles.getFirst());
             var entries = merged.has("entry")
                     ? (tools.jackson.databind.node.ArrayNode) merged.get("entry")
@@ -297,31 +323,25 @@ public class ShlCreationService {
         }
     }
 
-    private Mono<Void> createHealthCards(ShlDocument shl) {
-        return healthLakeService.fetchResourcesByCategory(
-                        shl.getPatientId(),
-                        shl.getCategories(),
-                        shl.getTimeframeStart(),
-                        shl.getTimeframeEnd()
-                )
-                .flatMap(wrapper -> shcService.createHealthCard(wrapper.getBundleJson())
-                        .flatMap(shcJson -> {
-                            String shcContentType = "application/smart-health-card";
-                            String encrypted = jweService.encrypt(shcJson, shl.getEncryptionKeyBase64(), shcContentType);
-                            String s3Key = "shl-files/" + shl.getId() + "/" + UUID.randomUUID();
-                            return s3StorageService.upload(s3Key, encrypted, shl.getExpirationTime())
-                                    .flatMap(key -> {
-                                        ShlFileDocument fileDoc = ShlFileDocument.builder()
-                                                .shlId(shl.getId())
-                                                .contentType(shcContentType)
-                                                .s3Key(key)
-                                                .contentLength(encrypted.getBytes(StandardCharsets.UTF_8).length)
-                                                .lastUpdated(Instant.now())
-                                                .createdAt(Instant.now())
-                                                .build();
-                                        return fileRepository.save(fileDoc);
-                                    });
-                        }))
+    private Mono<Void> createHealthCardFromBundle(ShlDocument shl, String bundleJson) {
+        return shcService.createHealthCard(bundleJson)
+                .flatMap(shcJson -> {
+                    String shcContentType = "application/smart-health-card";
+                    String encrypted = jweService.encrypt(shcJson, shl.getEncryptionKeyBase64(), shcContentType);
+                    String s3Key = "shl-files/" + shl.getId() + "/" + UUID.randomUUID();
+                    return s3StorageService.upload(s3Key, encrypted, shl.getExpirationTime())
+                            .flatMap(key -> {
+                                ShlFileDocument fileDoc = ShlFileDocument.builder()
+                                        .shlId(shl.getId())
+                                        .contentType(shcContentType)
+                                        .s3Key(key)
+                                        .contentLength(encrypted.getBytes(StandardCharsets.UTF_8).length)
+                                        .lastUpdated(Instant.now())
+                                        .createdAt(Instant.now())
+                                        .build();
+                                return fileRepository.save(fileDoc);
+                            });
+                })
                 .then();
     }
 }

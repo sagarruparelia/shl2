@@ -72,7 +72,7 @@ public class MemberService {
                     shl.setUpdatedAt(Instant.now());
                     return shlRepository.save(shl);
                 })
-                .then();
+                .flatMap(savedShl -> accessLogService.logAccess(savedShl, null, AccessType.REVOKED));
     }
 
     public Mono<MemberPreferencesResponse> getPreferences(String patientId) {
@@ -101,6 +101,22 @@ public class MemberService {
         return preferencesRepository.findByPatientId(patientId)
                 .map(MemberPreferencesDocument::isSharingEnabled)
                 .defaultIfEmpty(false);
+    }
+
+    public Mono<Void> ensureSharingEnabled(String patientId) {
+        return preferencesRepository.findByPatientId(patientId)
+                .defaultIfEmpty(MemberPreferencesDocument.builder()
+                        .patientId(patientId)
+                        .createdAt(Instant.now())
+                        .build())
+                .flatMap(doc -> {
+                    if (doc.isSharingEnabled()) {
+                        return Mono.empty();
+                    }
+                    doc.setSharingEnabled(true);
+                    doc.setUpdatedAt(Instant.now());
+                    return preferencesRepository.save(doc).then();
+                });
     }
 
     public Mono<Void> deleteAllPatientData(String patientId) {

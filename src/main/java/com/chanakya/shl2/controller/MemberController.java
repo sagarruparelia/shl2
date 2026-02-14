@@ -4,6 +4,7 @@ import com.chanakya.shl2.model.dto.request.UpdateMemberPreferencesRequest;
 import com.chanakya.shl2.model.dto.response.AccessLogEntry;
 import com.chanakya.shl2.model.dto.response.MemberPreferencesResponse;
 import com.chanakya.shl2.model.dto.response.MemberShlSummary;
+import com.chanakya.shl2.model.dto.response.PaginatedAccessLog;
 import com.chanakya.shl2.service.AccessLogService;
 import com.chanakya.shl2.service.MemberService;
 import jakarta.validation.Valid;
@@ -12,6 +13,7 @@ import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+// TODO: Add authentication (OAuth2/JWT) — member endpoints must be protected
 @RestController
 @RequestMapping("/api/member/{patientId}")
 public class MemberController {
@@ -37,8 +39,11 @@ public class MemberController {
     }
 
     @GetMapping("/access-log")
-    public Flux<AccessLogEntry> getAccessLog(@PathVariable String patientId) {
-        return accessLogService.getAccessLogForMember(patientId);
+    public Mono<PaginatedAccessLog> getAccessLog(
+            @PathVariable String patientId,
+            @RequestParam(defaultValue = "50") int limit,
+            @RequestParam(required = false) String cursor) {
+        return accessLogService.getAccessLogForMember(patientId, limit, cursor);
     }
 
     @GetMapping("/shls/{shlId}/access-log")

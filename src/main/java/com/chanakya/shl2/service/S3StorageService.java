@@ -2,6 +2,7 @@ package com.chanakya.shl2.service;
 
 import com.chanakya.shl2.config.ShlProperties;
 import org.springframework.stereotype.Service;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import software.amazon.awssdk.core.async.AsyncRequestBody;
 import software.amazon.awssdk.core.async.AsyncResponseTransformer;
@@ -83,7 +84,7 @@ public class S3StorageService {
                 .prefix(prefix)
                 .build();
 
-        return Mono.fromFuture(s3Client.listObjectsV2(listRequest))
+        return Flux.from(s3Client.listObjectsV2Paginator(listRequest))
                 .flatMap(listResponse -> {
                     List<ObjectIdentifier> objectIds = listResponse.contents().stream()
                             .map(s3Object -> ObjectIdentifier.builder().key(s3Object.key()).build())

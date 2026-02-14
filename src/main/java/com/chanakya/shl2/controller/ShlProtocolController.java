@@ -11,7 +11,6 @@ import reactor.core.publisher.Mono;
 
 @RestController
 @RequestMapping("/api/shl")
-@CrossOrigin("*")
 public class ShlProtocolController {
 
     private final ManifestService manifestService;

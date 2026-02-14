@@ -6,10 +6,17 @@ spring:
       uri: ${MONGODB_URI:mongodb://localhost:27017/shl2}
       auto-index-creation: true
 
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] [%X{correlationId:-}] %-5level %logger{36} - %msg%n"
+
 shl:
   base-url: ${SHL_BASE_URL:http://localhost:8080}
-  file-url-expiry-seconds: 3600
+  file-url-expiry-seconds: 300
   default-passcode-attempts: 5
+  passcode-lockout-duration-minutes: 30
+  cors:
+    allowed-origins: ${SHL_CORS_ALLOWED_ORIGINS:*}
   shc:
     issuer-url: ${SHC_ISSUER_URL:https://shl.example.com}
     signing-key-path: ${SHC_SIGNING_KEY_PATH:classpath:keys/shc-signing.jwk}

@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
+// TODO: Add authentication (OAuth2/JWT) — HealthLake endpoints must be protected
 @RestController
 @RequestMapping("/api/healthlake")
 public class HealthLakeController {

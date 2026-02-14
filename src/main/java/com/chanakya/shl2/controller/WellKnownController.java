@@ -1,7 +1,6 @@
 package com.chanakya.shl2.controller;
 
 import com.chanakya.shl2.crypto.JwsService;
-import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Mono;
@@ -10,7 +9,6 @@ import java.util.List;
 import java.util.Map;
 
 @RestController
-@CrossOrigin("*")
 public class WellKnownController {
 
     private final JwsService jwsService;

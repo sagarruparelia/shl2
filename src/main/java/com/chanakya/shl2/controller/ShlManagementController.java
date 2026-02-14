@@ -11,6 +11,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Mono;
 
+// TODO: Add authentication (OAuth2/JWT) — management endpoints must be protected
 @RestController
 @RequestMapping("/api/shl")
 public class ShlManagementController {

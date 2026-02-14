@@ -68,8 +68,15 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(HealthLakeException.class)
     public Mono<ResponseEntity<ErrorResponse>> handleHealthLake(HealthLakeException ex) {
+        log.error("HealthLake error: {}", ex.getMessage(), ex);
         return Mono.just(ResponseEntity.status(HttpStatus.BAD_GATEWAY)
-                .body(new ErrorResponse("healthlake_error", ex.getMessage())));
+                .body(new ErrorResponse("healthlake_error", "Failed to retrieve health data")));
+    }
+
+    @ExceptionHandler(IllegalArgumentException.class)
+    public Mono<ResponseEntity<ErrorResponse>> handleIllegalArgument(IllegalArgumentException ex) {
+        return Mono.just(ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(new ErrorResponse("validation_error", ex.getMessage())));
     }
 
     @ExceptionHandler(IllegalStateException.class)
